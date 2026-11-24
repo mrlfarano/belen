@@ -2,6 +2,8 @@
 
 **The interface is the conversation.**
 
+![BELEN — the answer that becomes a tool](assets/demo.gif)
+
 BELEN is a native Windows room where you type, the model answers, and the answer becomes the tool you need. A single continuous typographic surface — no bubbles, no cards, no avatars, no sidebar. Provider-agnostic, local-first, portable.
 
 ## Highlights
@@ -97,4 +99,4 @@ with the perf report included.
 
 ## License
 
-All rights reserved. © 2026 mrlfarano
+[MIT](LICENSE) © 2026 mrlfarano

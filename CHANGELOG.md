@@ -3,6 +3,12 @@
 All notable changes to BELEN are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is SemVer.
 
+## [Unreleased]
+
+### Added
+
+- MIT license; repository README with an animated demo of the room.
+
 ## [0.1.0] — 2026-11-24
 
 First public release.
