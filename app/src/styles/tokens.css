@@ -1,0 +1,62 @@
+:root {
+  color-scheme: dark;
+
+  /* Surface */
+  --paper: #0a0a0b;
+  --paper-raised: #111113;
+  --paper-sunken: #060607;
+
+  /* Ink */
+  --ink: #f2efe9;
+  --ink-dim: #a8a29a;
+  --ink-faint: #6b665f;
+
+  /* Accent */
+  --accent: #c8a26a;
+  --accent-soft: rgba(200, 162, 106, 0.14);
+  --accent-line: rgba(200, 162, 106, 0.45);
+
+  /* Rules */
+  --rule: rgba(242, 239, 233, 0.12);
+  --rule-strong: rgba(242, 239, 233, 0.24);
+  /* Type */
+  --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, "Times New Roman", serif;
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, "SFMono-Regular", monospace;
+
+  /* Scale — 1.25 ratio, editorial */
+  --step--2: 0.764rem;
+  --step--1: 0.875rem;
+  --step-0: 1rem;
+  --step-1: 1.25rem;
+  --step-2: 1.563rem;
+  --step-3: 1.953rem;
+  --step-4: 2.441rem;
+  --step-5: 3.052rem;
+
+  /* Layout */
+  --measure: 66ch;
+  --gutter: clamp(20px, 6vw, 88px);
+  --radius: 2px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 90ms;
+  --dur: 180ms;
+  --dur-slow: 320ms;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --paper: #f4f1ea;
+  --paper-raised: #ece7dc;
+  --paper-sunken: #e6e0d3;
+  --ink: #16150f;
+  --ink-dim: #4a463c;
+  --ink-faint: #857f72;
+  --accent: #8a6a32;
+  --accent-soft: rgba(138, 106, 50, 0.12);
+  --accent-line: rgba(138, 106, 50, 0.45);
+  --rule: rgba(22, 21, 15, 0.12);
+  --rule-strong: rgba(22, 21, 15, 0.24);
+}

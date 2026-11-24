@@ -1,0 +1,54 @@
+{
+  "budget": {
+    "droppedFrames": {
+      "pass": true,
+      "target": 0,
+      "unit": "frames"
+    },
+    "exeBytes": {
+      "pass": true,
+      "target": 15728640,
+      "unit": "bytes"
+    },
+    "keystrokeP99Ms": {
+      "pass": true,
+      "target": 5,
+      "unit": "ms"
+    },
+    "startupMs": {
+      "pass": true,
+      "target": 1000,
+      "unit": "ms"
+    },
+    "workingSetBytes": {
+      "pass": true,
+      "target": 125829120,
+      "unit": "bytes"
+    }
+  },
+  "collectedAt": "2026-11-24T07:07:59.747Z",
+  "dpr": 1,
+  "droppedFrames": 0,
+  "exeBytes": 10247680,
+  "frames": 180,
+  "hasFocus": true,
+  "keystrokeFrameMaxMs": 6.3,
+  "keystrokeFrameP99Ms": 6.2,
+  "keystrokeMaxMs": 0.9,
+  "keystrokeP99Ms": 0.4,
+  "longTaskTotalMs": 0,
+  "longTasks": 0,
+  "maxFrameMs": 6.2,
+  "medianFrameMs": 6.1,
+  "navToModuleMs": 53.9,
+  "navToPaintMs": 191.7,
+  "setupMs": 772.42,
+  "startupMs": 855.95,
+  "streamDroppedFrames": 0,
+  "streamFrames": 240,
+  "streamTokens": 2000,
+  "viewportHeight": 820,
+  "viewportWidth": 1280,
+  "visibility": "visible",
+  "workingSetBytes": 26996736
+}

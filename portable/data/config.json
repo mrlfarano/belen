@@ -1,0 +1,32 @@
+{
+  "grants": {
+    "export-markdown": [
+      "files"
+    ]
+  },
+  "provider": {
+    "authMode": "apiKey",
+    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+    "envVar": "OPENAI_API_KEY",
+    "id": "zai-coding",
+    "kind": "openai",
+    "label": "Z.ai Coding Plan",
+    "maxTokens": 4096,
+    "model": "glm-5.3-flash",
+    "oauth": {
+      "clientId": "",
+      "deviceEndpoint": "",
+      "scope": "",
+      "tokenEndpoint": ""
+    },
+    "temperature": 0.7
+  },
+  "skills": [
+    "export-markdown",
+    "concise",
+    "table-first",
+    "cite",
+    "researcher",
+    "critic"
+  ]
+}
