@@ -714,9 +714,12 @@ mod tests {
     fn search_finds_and_caps_matches() {
         let ws = temp_workspace("search");
         let root = canonical_str(&ws);
+        // The needle files live in src/ so the reported relative paths carry a
+        // separator on every platform, and 150 of them push past the 100-match
+        // hard cap the second half of this test asserts.
         fs::create_dir_all(ws.join("src")).unwrap();
-        for i in 0..60 {
-            fs::write(ws.join(format!("f{i}.txt")), "needle here\nother\n").unwrap();
+        for i in 0..150 {
+            fs::write(ws.join("src").join(format!("f{i}.txt")), "needle here\nother\n").unwrap();
         }
         fs::create_dir_all(ws.join("node_modules")).unwrap();
         fs::write(ws.join("node_modules").join("n.txt"), "needle ignored\n").unwrap();
