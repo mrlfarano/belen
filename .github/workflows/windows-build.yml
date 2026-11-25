@@ -43,18 +43,29 @@ jobs:
           $exe = Join-Path $env:USERPROFILE '.belen-target\release\belen.exe'
           if (-not (Test-Path $exe)) { throw "build produced no exe at $exe" }
 
+          # Artifact first — the upload never depends on the test folder.
           $stage = Join-Path $env:GITHUB_WORKSPACE 'artifact'
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item $exe (Join-Path $stage 'BELEN.exe') -Force
 
           # Stable test location: data/ created beside it survives rebuilds.
+          # A running BELEN locks its exe, and Windows allows renaming a
+          # running image but not overwriting it — so move the old one aside;
+          # the open instance keeps working, the next launch is the new build.
           $test = Join-Path $env:USERPROFILE 'belen-dev'
           New-Item -ItemType Directory -Force $test | Out-Null
-          Copy-Item $exe (Join-Path $test 'BELEN.exe') -Force
+          $testExe = Join-Path $test 'BELEN.exe'
+          try {
+            Copy-Item $exe $testExe -Force
+          } catch {
+            Move-Item $testExe (Join-Path $test 'BELEN.previous.exe') -Force
+            Copy-Item $exe $testExe -Force
+            Write-Output "BELEN is running — left it open; BELEN.exe is now the new build (previous one kept as BELEN.previous.exe)."
+          }
 
           $version = (Get-Content src-tauri\tauri.conf.json | ConvertFrom-Json).version
           Write-Output "BELEN $version built."
-          Write-Output "Test it at: $test\BELEN.exe"
+          Write-Output "Test it at: $testExe"
 
       - uses: actions/upload-artifact@v4
         with:
