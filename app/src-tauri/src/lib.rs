@@ -3,6 +3,7 @@ mod keys;
 mod oauth;
 mod perf;
 mod provider;
+mod tools;
 mod updater;
 
 use db::SearchHit;
@@ -140,9 +141,42 @@ async fn provider_stream(
     model: String,
     system: Option<String>,
     messages: Vec<ChatMessage>,
+    // Optional so the existing callers (probes, sub-agents) keep working.
+    tools: Option<Vec<provider::ToolSchema>>,
+    stream_id: Option<String>,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), String> {
-    provider::stream(spec, model, system, messages, on_event).await
+    provider::stream(
+        spec,
+        model,
+        system,
+        messages,
+        tools.unwrap_or_default(),
+        stream_id.unwrap_or_default(),
+        on_event,
+    )
+    .await
+}
+
+/// Aborts the HTTP stream registered under `stream_id`. Unknown ids are a no-op.
+#[tauri::command]
+fn provider_cancel(stream_id: String) {
+    provider::cancel_stream(&stream_id)
+}
+
+/// The deny-by-default tool broker. Denials and failures come back as
+/// structured outcomes (not IPC errors) so the model receives them as tool
+/// results keyed by its own call id. Arguments arrive as raw JSON text and are
+/// re-parsed here: the renderer's validation is convenience, not trust.
+#[tauri::command]
+async fn tool_exec(
+    workspace_root: String,
+    name: String,
+    call_id: String,
+    args_json: String,
+    stream_id: String,
+) -> Result<tools::ToolOutcome, String> {
+    Ok(tools::exec(&workspace_root, &name, &call_id, &args_json, &stream_id).await)
 }
 
 #[tauri::command]
@@ -274,6 +308,8 @@ pub fn run() {
             provider_discover,
             provider_test,
             provider_stream,
+            provider_cancel,
+            tool_exec,
             oauth_device_start,
             oauth_device_poll,
             oauth_refresh,

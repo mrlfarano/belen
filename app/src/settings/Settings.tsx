@@ -3,9 +3,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { knownModels, PROVIDERS } from '../providers/registry'
 import { discover, providerKey, providerOAuthKey, saveConfig, testProvider } from '../providers/client'
 import { loadOAuth } from '../providers/auth'
+import { CHAT_WIDTHS, withChatWidth, widthOf, withWorkspace } from '../providers/config'
 import type {
   AppConfig,
   AuthMode,
+  ChatWidth,
   DeviceStart,
   ModelInfo,
   TestResult,
@@ -20,7 +22,7 @@ type Props = {
   onClose: () => void
   onSaved: (config: AppConfig) => void
   onChange?: (config: AppConfig) => void
-  initialTab?: 'provider' | 'skills' | 'about'
+  initialTab?: 'provider' | 'chat' | 'skills' | 'about'
   onBeforeRestart?: () => void
   autoCheck?: boolean
 }
@@ -50,9 +52,10 @@ export default function Settings(props: Props) {
   const [error, setError] = createSignal<string | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
   const [test, setTest] = createSignal<TestResult | null>(null)
-  const [tab, setTab] = createSignal<'provider' | 'skills' | 'about'>(
+  const [tab, setTab] = createSignal<'provider' | 'chat' | 'skills' | 'about'>(
     props.initialTab ?? 'provider',
   )
+  const [workspaceField, setWorkspaceField] = createSignal(props.config?.workspace ?? '')
 
   const [oauthClientId, setOauthClientId] = createSignal('')
   const [deviceEndpoint, setDeviceEndpoint] = createSignal('')
@@ -332,7 +335,10 @@ export default function Settings(props: Props) {
         setModel(chosen)
       }
 
+      // Merge over the saved config: replacing it wholesale would wipe
+      // skills, grants, and the chat settings.
       const next: AppConfig = {
+        ...(props.config ?? {}),
         provider: {
           id,
           label: provider()?.label ?? 'Custom provider',
@@ -376,6 +382,19 @@ export default function Settings(props: Props) {
     props.onChange?.(next)
   }
 
+  const changeWidth = async (width: ChatWidth) => {
+    const next = withChatWidth(props.config, width)
+    await saveConfig(next)
+    props.onChange?.(next)
+  }
+
+  const changeWorkspace = async (raw: string) => {
+    setWorkspaceField(raw)
+    const next = withWorkspace(props.config, raw)
+    await saveConfig(next)
+    props.onChange?.(next)
+  }
+
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') props.onClose()
@@ -413,6 +432,12 @@ export default function Settings(props: Props) {
             Provider
           </button>
           <button
+            classList={{ active: tab() === 'chat' }}
+            onClick={() => setTab('chat')}
+          >
+            Chat
+          </button>
+          <button
             classList={{ active: tab() === 'skills' }}
             onClick={() => setTab('skills')}
           >
@@ -425,6 +450,50 @@ export default function Settings(props: Props) {
             About
           </button>
         </div>
+
+        <Show when={tab() === 'chat'}>
+          <h2 class="settings-title">Chat</h2>
+
+          <label class="field">
+            <span class="field-label">Conversation width</span>
+            <div class="width-options" role="group" aria-label="Conversation width">
+              <For each={CHAT_WIDTHS}>
+                {(w) => (
+                  <button
+                    class="width-option"
+                    classList={{ active: widthOf(props.config) === w.id }}
+                    onClick={() => void changeWidth(w.id)}
+                  >
+                    {w.label}
+                  </button>
+                )}
+              </For>
+              <button class="width-reset" onClick={() => void changeWidth('default')}>
+                Reset
+              </button>
+            </div>
+            <p class="hint-line">
+              Applies to the conversation column. Default keeps the classic 66-character
+              measure; oversized tables, charts and code scroll inside their own containers.
+            </p>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Workspace</span>
+            <input
+              class="field-input"
+              value={workspaceField()}
+              onChange={(e) => void changeWorkspace(e.currentTarget.value)}
+              placeholder="C:\path\to\workspace"
+              spellcheck={false}
+            />
+            <p class="hint-line">
+              Folder the assistant may look into with its read-only tools (list, read,
+              search). Nothing is written. Paths outside this folder and credential files
+              (.env, keys, DPAPI store) are denied by a Rust broker.
+            </p>
+          </label>
+        </Show>
 
         <Show when={tab() === 'provider'}>
           <Show when={!selected()}>

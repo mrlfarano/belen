@@ -51,6 +51,111 @@
   margin-inline: auto;
 }
 
+/* The scroll-follow observer watches this wrapper's height. */
+.measure-content {
+  max-width: var(--measure);
+  margin-inline: auto;
+}
+
+/* ---------- conversation width setting ---------- */
+/* Default keeps the token 66ch measure; every option clamps to the window
+   so narrow windows stay usable. */
+
+.room.width-narrow {
+  --measure: min(48ch, 100%);
+}
+
+.room.width-wide {
+  --measure: min(96ch, 100%);
+}
+
+.room.width-full {
+  --measure: 100%;
+}
+
+.room.width-wide .body {
+  max-width: 80ch;
+}
+
+.room.width-full .body {
+  max-width: none;
+}
+
+/* ---------- jump to latest ---------- */
+
+.jump-latest {
+  position: sticky;
+  bottom: 12px;
+  display: block;
+  margin: 0 auto;
+  padding: 7px 14px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  background: var(--paper-raised);
+  box-shadow: 0 12px 30px -12px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.jump-latest:hover {
+  border-color: var(--accent-line);
+}
+
+/* ---------- tool activity ---------- */
+
+.tool-block {
+  margin: 3vh 0;
+}
+
+.tool-block > summary {
+  cursor: pointer;
+  list-style: none;
+  margin: 0;
+}
+
+.tool-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-glyph {
+  background: var(--ink-faint);
+  animation: none;
+}
+
+.tool-glyph.ok {
+  background: #8fae8b;
+}
+
+.tool-glyph.denied {
+  background: #d9a26b;
+}
+
+.tool-glyph.error {
+  background: #d98b7a;
+}
+
+.tool-glyph.running {
+  background: var(--accent);
+  animation: pulse 1.6s var(--ease) infinite;
+}
+
+.tool-summary {
+  margin: 0;
+}
+
+.tool-output {
+  margin: 1.4vh 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: var(--step--2);
+}
+
 .eyebrow {
   margin: 0 0 5vh;
   font-family: var(--mono);
@@ -66,6 +171,7 @@
   font-size: var(--step-1);
   font-style: italic;
   color: var(--ink-dim);
+  overflow-wrap: anywhere;
 }
 
 .lede {
@@ -99,8 +205,14 @@
 
 /* ---------- the artifact ---------- */
 
+/* Oversized tables scroll inside their own container, never the window. */
+.artifact-wrap {
+  overflow-x: auto;
+}
+
 .artifact {
   width: 100%;
+  min-width: max-content;
   margin: 5vh 0 0;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
@@ -336,6 +448,7 @@
   font-family: var(--mono);
   font-size: var(--step--2);
   color: var(--ink-faint);
+  overflow-wrap: anywhere;
 }
 
 .empty-room {
@@ -1128,6 +1241,46 @@ select.field-input option {
   display: flex;
   gap: 12px;
   margin-top: 5vh;
+}
+
+/* ---------- chat settings ---------- */
+
+.width-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.width-option,
+.width-reset {
+  padding: 8px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: var(--step--2);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.width-option:hover,
+.width-reset:hover {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+
+.width-option.active {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.width-reset {
+  margin-left: auto;
 }
 
 .primary-action {

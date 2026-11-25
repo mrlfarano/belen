@@ -39,12 +39,27 @@ export type TestResult = {
 
 export type StreamEvent =
   | { type: 'token'; text: string }
+  | { type: 'toolCall'; callId: string; name: string; arguments: string }
   | { type: 'done'; usage?: unknown }
   | { type: 'error'; message: string }
+
+/** A tool call the model asked for, in provider-neutral form. */
+export type ToolCallRef = {
+  id: string
+  name: string
+  /** Raw JSON text as produced by the model — untrusted until validated. */
+  arguments: string
+}
 
 export type ChatMessage = {
   role: string
   content: string
+  /** assistant → tool calls it issued. */
+  toolCalls?: ToolCallRef[]
+  /** role "tool" → the call id this message answers. */
+  toolCallId?: string
+  /** role "tool" → the tool name, required by some providers (Google). */
+  name?: string
 }
 
 export type ProviderConfig = {
@@ -96,8 +111,16 @@ export type TokenPoll = {
   error?: string
 }
 
+export type ChatWidth = 'narrow' | 'default' | 'wide' | 'full'
+
 export type AppConfig = {
   provider?: ProviderConfig
   skills?: string[]
   grants?: Record<string, string[]>
+  chat?: {
+    /** Conversation column width; absent = 'default' (the 0.2 look). */
+    width?: ChatWidth
+  }
+  /** Absolute path of the workspace the read-only tools may look into. */
+  workspace?: string
 }

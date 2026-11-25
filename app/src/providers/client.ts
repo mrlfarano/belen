@@ -7,6 +7,7 @@ import type {
   StreamEvent,
   TestResult,
 } from './types'
+import type { ToolSchema } from './tools'
 
 export function discover(spec: ProviderSpec): Promise<ModelInfo[]> {
   return invoke<ModelInfo[]>('provider_discover', { spec })
@@ -16,16 +17,36 @@ export function testProvider(spec: ProviderSpec, model: string): Promise<TestRes
   return invoke<TestResult>('provider_test', { spec, model })
 }
 
+/**
+ * Streams one assistant turn. `tools` attaches the workspace tool schemas;
+ * `streamId` lets provider_cancel abort the HTTP stream mid-flight.
+ * Existing callers (sub-agents, probes) omit both and behave as before.
+ */
 export function streamChat(
   spec: ProviderSpec,
   model: string,
   messages: ChatMessage[],
   system: string | undefined,
   onEvent: (event: StreamEvent) => void,
+  tools?: ToolSchema[],
+  streamId?: string,
 ): Promise<void> {
   const channel = new Channel<StreamEvent>()
   channel.onmessage = onEvent
-  return invoke('provider_stream', { spec, model, system, messages, onEvent: channel })
+  return invoke('provider_stream', {
+    spec,
+    model,
+    system,
+    messages,
+    tools: tools ?? [],
+    streamId: streamId ?? '',
+    onEvent: channel,
+  })
+}
+
+/** Aborts the HTTP stream registered under `streamId` (no-op if finished). */
+export function cancelStream(streamId: string): Promise<void> {
+  return invoke('provider_cancel', { streamId })
 }
 
 export async function loadConfig(): Promise<AppConfig> {
