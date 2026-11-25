@@ -5,7 +5,7 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-11-24
+## [0.3.0] — 2026-11-25
 
 ### Added
 
