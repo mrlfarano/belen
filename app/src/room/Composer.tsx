@@ -1,5 +1,9 @@
 import { createSignal } from 'solid-js'
 
+// Room.tsx binds the palette to both Ctrl and Cmd, so the hint follows the
+// platform: Cmd on macOS, Ctrl everywhere else.
+const isMac = /Mac/i.test(navigator.platform)
+
 export default function Composer(props: { onSend: (text: string) => void }) {
   let el: HTMLTextAreaElement | undefined
   const [composing, setComposing] = createSignal(false)
@@ -53,7 +57,7 @@ export default function Composer(props: { onSend: (text: string) => void }) {
           }
         }}
       />
-      <span class="hint">Ctrl K</span>
+      <span class="hint">{isMac ? '⌘ K' : 'Ctrl K'}</span>
     </footer>
   )
 }

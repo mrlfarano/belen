@@ -1,10 +1,9 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
+import { resolveBelenExe } from './lib/exe-path.mjs'
 
-const exe =
-  process.env.BELEN_EXE ||
-  join(process.env.USERPROFILE, '.belen-target', 'release', 'belen.exe')
+const exe = resolveBelenExe()
 const report = resolve('data/summon.json')
 
 // Target is 120 ms. The gate allows 150 ms because the second process's

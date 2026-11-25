@@ -1,10 +1,9 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { resolveBelenExe } from './lib/exe-path.mjs'
 
-const exe =
-  process.env.BELEN_EXE ||
-  join(process.env.USERPROFILE, '.belen-target', 'release', 'belen.exe')
+const exe = resolveBelenExe()
 const key = process.env.BELEN_LIVE_KEY
 
 if (!key) {

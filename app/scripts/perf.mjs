@@ -1,12 +1,9 @@
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
+import { buildHint, resolvePerfExe } from './lib/exe-path.mjs'
 
-const localExe = resolve('src-tauri/target/debug/belen.exe')
-const shortExe = process.env.USERPROFILE
-  ? join(process.env.USERPROFILE, '.belen-target', 'debug', 'belen.exe')
-  : localExe
-const exe = process.env.BELEN_EXE || (existsSync(shortExe) ? shortExe : localExe)
+const exe = resolvePerfExe()
 const reportPath = resolve('data/perf.json')
 
 // A single cold run is too noisy to gate on (Windows Defender scans freshly
@@ -33,7 +30,7 @@ const fmt = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`
 
 if (!existsSync(exe)) {
   console.error(`No build at ${exe}`)
-  console.error('Run: pnpm build && powershell -File scripts/build.ps1 -Release')
+  console.error(buildHint)
   process.exit(1)
 }
 
