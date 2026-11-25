@@ -5,14 +5,15 @@ on Windows, a bare `BELEN` on macOS, `data/` beside it, no installer. It
 ships through **itself**: releases go to GitHub Releases, and the app's
 Settings → About tab installs them over the air.
 
-Machines: **HAMMER** (Mac — develop here) and **MAYA** (Windows — builds and
-tests there via a self-hosted Actions runner). The Rust crate compiles on
-Windows and macOS; HAMMER builds and runs it too, plus the frontend gates
-and release tooling.
+Machines: **illaoi** (Mac — develop here, reach HAMMER over Tailscale as
+`ssh la@hammer`) and **MAYA** (Windows — builds and tests there via a
+self-hosted Actions runner). The Rust crate compiles on Windows and macOS;
+illaoi builds and runs it too, plus the frontend gates and release tooling.
+The signing key's original lives on HAMMER (see the rules below).
 
 ## The loop — how every bug fix and feature ships
 
-Work on HAMMER unless told otherwise. Any change that should reach the user's
+Work on illaoi unless told otherwise. Any change that should reach the user's
 app follows this exact sequence:
 
 1. **Implement** in the relevant module. Frontend gates before pushing:
@@ -81,10 +82,11 @@ Docs-only pushes also trigger a build; that is fine — no release follows.
 - **The updater refuses debug builds and non-HTTPS feeds** (loopback http is
   allowed for rehearsals via `BELEN_UPDATE_FEED`). Don't try to update from
   a `tauri dev` build.
-- **Signing key**: `~/.belen/update-private.pem` (HAMMER, chmod 600). The
-  public key is committed at `app/src-tauri/update.pubkey` and compiled into
-  every binary. Losing the private key means existing installs can only be
-  updated by hand — back it up offline; do not regenerate casually, and
+- **Signing key**: `~/.belen/update-private.pem` (chmod 600). The original
+  lives on HAMMER; a copy is on illaoi, where the repo and releases live.
+  The public key is committed at `app/src-tauri/update.pubkey` and compiled
+  into every binary. Losing the private key means existing installs can only
+  be updated by hand — back it up offline; do not regenerate casually, and
   never commit any `.private.pem`.
 - **CI files are sensitive here** (`.github/workflows/windows-build.yml`
   encodes the build machine's quirks) — change them only with the user's
