@@ -73,6 +73,29 @@ describe('sub-agent run', () => {
     expect(seen).toEqual([{ role: 'user', content: 'standalone prompt' }])
   })
 
+  it('is told what day it is, ahead of its instructions', async () => {
+    let system: string | undefined
+    const stream: AgentStream = async (_spec, _model, _messages, prompt, onEvent) => {
+      system = prompt
+      onEvent({ type: 'done' })
+    }
+
+    const run = startSubAgent(
+      {
+        manifest,
+        input: 'hello',
+        model: 'mock-fast',
+        spec,
+        handlers: { onToken: () => {}, onStatus: () => {} },
+      },
+      stream,
+    )
+    await run.finished
+
+    expect(system).toMatch(/^Today is \w+, \d{1,2} \w+ \d{4}\. /)
+    expect(system?.endsWith('be brief')).toBe(true)
+  })
+
   it('cancel disposes the run once and drops late tokens', async () => {
     let emit: ((event: StreamEvent) => void) | undefined
     let unblock: (() => void) | undefined

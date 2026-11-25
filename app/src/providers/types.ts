@@ -113,6 +113,27 @@ export type TokenPoll = {
 
 export type ChatWidth = 'narrow' | 'default' | 'wide' | 'full'
 
+export type FilesAccess = 'read' | 'write'
+export type AskBefore = 'changes' | 'commands' | 'never'
+export type SearchBackend = 'tavily'
+
+/**
+ * The tool switches (Settings → Chat → Tools). Absent or malformed values
+ * mean "off"; the Rust broker reads the same section and refuses a class that
+ * is not exactly switched on, so this is a preference, not the trust boundary.
+ */
+export type ToolsConfig = {
+  /** Web search and page fetch. */
+  network?: boolean
+  /** `read` keeps the workspace read-only; `write` adds create and edit. */
+  files?: FilesAccess
+  /** Commands on this computer. */
+  shell?: boolean
+  /** Which calls pause for approval in the room. */
+  askBefore?: AskBefore
+  search?: SearchBackend
+}
+
 export type AppConfig = {
   provider?: ProviderConfig
   skills?: string[]
@@ -121,6 +142,7 @@ export type AppConfig = {
     /** Conversation column width; absent = 'default' (the 0.2 look). */
     width?: ChatWidth
   }
-  /** Absolute path of the workspace the read-only tools may look into. */
+  /** Absolute path of the workspace the tools may look into. */
   workspace?: string
+  tools?: ToolsConfig
 }

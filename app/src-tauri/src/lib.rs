@@ -3,8 +3,10 @@ mod keys;
 mod oauth;
 mod perf;
 mod provider;
+mod shell;
 mod tools;
 mod updater;
+mod web;
 
 use db::SearchHit;
 
@@ -158,16 +160,21 @@ async fn provider_stream(
     .await
 }
 
-/// Aborts the HTTP stream registered under `stream_id`. Unknown ids are a no-op.
+/// Aborts the HTTP stream registered under `stream_id`, if it is still
+/// running, and marks the id as cancelled: a tool call or a command from that
+/// run still in flight stops on it.
 #[tauri::command]
 fn provider_cancel(stream_id: String) {
     provider::cancel_stream(&stream_id)
 }
 
-/// The deny-by-default tool broker. Denials and failures come back as
-/// structured outcomes (not IPC errors) so the model receives them as tool
-/// results keyed by its own call id. Arguments arrive as raw JSON text and are
-/// re-parsed here: the renderer's validation is convenience, not trust.
+/// The tool broker. Which classes may run is decided here, per call, from the
+/// switches in config.json — the webview only chooses what to advertise.
+/// Denials and failures come back as structured outcomes (not IPC errors) so
+/// the model receives them as tool results keyed by its own call id.
+/// Arguments arrive as raw JSON text and are re-parsed here: the renderer's
+/// validation is convenience, not trust. `approved` is the webview's word that
+/// the user okayed the call in the room; absent counts as not approved.
 #[tauri::command]
 async fn tool_exec(
     workspace_root: String,
@@ -175,8 +182,17 @@ async fn tool_exec(
     call_id: String,
     args_json: String,
     stream_id: String,
+    approved: Option<bool>,
 ) -> Result<tools::ToolOutcome, String> {
-    Ok(tools::exec(&workspace_root, &name, &call_id, &args_json, &stream_id).await)
+    Ok(tools::exec(
+        &workspace_root,
+        &name,
+        &call_id,
+        &args_json,
+        &stream_id,
+        approved.unwrap_or(false),
+    )
+    .await)
 }
 
 #[tauri::command]

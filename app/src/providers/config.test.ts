@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_WIDTHS, mergeConfig, withChatWidth, widthOf, withWorkspace } from './config'
+import {
+  ASK_BEFORE_OPTIONS,
+  CHAT_WIDTHS,
+  mergeConfig,
+  toolsOf,
+  withChatWidth,
+  withTools,
+  widthOf,
+  withWorkspace,
+} from './config'
 import type { AppConfig } from './types'
 
 const baseConfig: AppConfig = {
@@ -50,6 +59,8 @@ describe('chat width', () => {
 
   it('offers exactly the four documented options', () => {
     expect(CHAT_WIDTHS.map((w) => w.id)).toEqual(['narrow', 'default', 'wide', 'full'])
+    // Every value the type allows has a choice, and the strictest is first.
+    expect(ASK_BEFORE_OPTIONS.map((o) => o.id)).toEqual(['changes', 'commands', 'never'])
   })
 })
 
@@ -57,5 +68,42 @@ describe('workspace', () => {
   it('trims and drops empty values', () => {
     expect(withWorkspace(baseConfig, '  C:\\repo  ').workspace).toBe('C:\\repo')
     expect(withWorkspace(baseConfig, '   ').workspace).toBeUndefined()
+  })
+})
+
+describe('tool switches', () => {
+  const everythingOff = {
+    network: false,
+    files: 'read',
+    shell: false,
+    askBefore: 'changes',
+    search: 'tavily',
+  } as const
+
+  it('are all off when the section is missing or empty', () => {
+    expect(toolsOf(null)).toEqual(everythingOff)
+    expect(toolsOf({})).toEqual(everythingOff)
+    expect(toolsOf({ tools: {} })).toEqual(everythingOff)
+  })
+
+  it('count anything but the exact schema as off, like the broker does', () => {
+    const odd = {
+      tools: { network: 'yes', files: 'editor', shell: 1, askBefore: 'sometimes' },
+    } as unknown as AppConfig
+    expect(toolsOf(odd)).toEqual(everythingOff)
+  })
+
+  it('read back exactly what was switched on', () => {
+    const on = toolsOf(
+      withTools(null, { network: true, files: 'write', shell: true, askBefore: 'commands' }),
+    )
+    expect(on).toEqual({ ...everythingOff, network: true, files: 'write', shell: true, askBefore: 'commands' })
+  })
+
+  it('change one switch without disturbing the others or the rest of the config', () => {
+    const next = withTools(withTools(baseConfig, { network: true }), { shell: true })
+    expect(next.tools).toEqual({ network: true, shell: true })
+    expect(next.provider?.id).toBe('zai')
+    expect(next.grants).toEqual({ summarize: ['net'] })
   })
 })

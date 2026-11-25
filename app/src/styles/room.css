@@ -156,6 +156,22 @@
   font-size: var(--step--2);
 }
 
+/* What a gated call would do, shown in full while it waits for the user. */
+.tool-preview {
+  padding: 1.2vh 12px;
+  border: 1px solid var(--rule);
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.tool-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 1.4vh 0 0;
+}
+
 .eyebrow {
   margin: 0 0 5vh;
   font-family: var(--mono);
@@ -1172,6 +1188,20 @@ select.field-input option {
 .field-range {
   width: 100%;
   accent-color: var(--accent);
+}
+
+/* One line of a checkbox or radio choice in Settings (tool switches, ask-before). */
+.tool-switch {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin: 0.8vh 0;
+  cursor: pointer;
+}
+
+.tool-switch input {
+  accent-color: var(--accent);
+  margin: 0;
 }
 
 .field-grid {

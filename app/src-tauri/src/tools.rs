@@ -5,13 +5,37 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::provider;
+use crate::shell;
+use crate::web;
 
-/// Everything the broker allows lives in this one list. Edits, writes, shell
-/// and general network access are NOT here; each would be a separately
-/// authorized capability class (see app/src/providers/tools.ts for the plan).
-const ALLOWED_TOOLS: [&str; 3] = ["workspace_list", "workspace_read", "workspace_search"];
+/// The one class that needs no switch: looking never changed anything.
+const READ_TOOLS: [&str; 3] = ["workspace_list", "workspace_read", "workspace_search"];
+
+/// Every tool the broker knows how to run. Which of them a call may use is
+/// decided per call by `Policy` (Settings → Chat → Tools): workspace reads
+/// are always available, every other class stays off until the user switches
+/// it on. A name missing here is refused no matter what is switched on.
+const ALLOWED_TOOLS: [&str; 8] = [
+    "workspace_list",
+    "workspace_read",
+    "workspace_search",
+    "web_search",
+    "web_fetch",
+    "workspace_write",
+    "workspace_edit",
+    "run_command",
+];
 
 const TOOL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Web tools bound themselves (and follow redirects); this is the backstop.
+const WEB_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// One `workspace_write` may carry this much; `workspace_edit` works on
+/// files up to the second figure.
+const MAX_WRITE_BYTES: usize = 256 * 1024;
+const MAX_EDIT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_OLD_TEXT_CHARS: usize = 32_000;
+const MAX_NEW_TEXT_CHARS: usize = 64_000;
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_READ_BYTES: u64 = 65_536;
 const SEARCH_DEFAULT_MATCHES: u64 = 50;
@@ -51,7 +75,9 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-enum ToolError {
+/// Why a tool did not do what was asked.
+#[derive(Debug)]
+pub(crate) enum ToolError {
     /// Policy refusal (escape, credential, data dir). Not a failure.
     Denied(String),
     /// Operation could not be performed.
@@ -91,6 +117,108 @@ fn failed(call_id: &str, message: &str) -> ToolOutcome {
     }
 }
 
+/// Which calls stop for the user's approval in the room before they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    /// Commands and file changes.
+    Changes,
+    /// Commands only; file changes apply on their own.
+    Commands,
+    /// Nothing waits — the user chose this.
+    Never,
+}
+
+/// The tool switches as the user set them in Settings → Chat → Tools. This is
+/// the trust boundary: the webview decides which tools to advertise, but the
+/// broker reads the switches itself for every call, so flipping one off takes
+/// effect on the next call and nothing depends on the webview's good behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Policy {
+    pub network: bool,
+    pub files_write: bool,
+    pub shell: bool,
+    pub ask: Ask,
+}
+
+impl Default for Policy {
+    /// Absent settings mean every switch is off and the strictest approval.
+    fn default() -> Self {
+        Policy {
+            network: false,
+            files_write: false,
+            shell: false,
+            ask: Ask::Changes,
+        }
+    }
+}
+
+impl Policy {
+    /// From the `tools` section of config.json. A value that is not exactly
+    /// what the schema says counts as off — a hand-edited "yes", "editor" or
+    /// "sometimes" never widens what the model may do.
+    pub fn from_config(tools: &serde_json::Value) -> Policy {
+        let ask = match tools["askBefore"].as_str() {
+            Some("commands") => Ask::Commands,
+            Some("never") => Ask::Never,
+            _ => Ask::Changes,
+        };
+        Policy {
+            network: tools["network"].as_bool() == Some(true),
+            files_write: tools["files"].as_str() == Some("write"),
+            shell: tools["shell"].as_bool() == Some(true),
+            ask,
+        }
+    }
+
+    /// `Err` carries the reason the model is given, so it can tell the user
+    /// which switch to flip instead of guessing.
+    fn allowed(&self, tool: &str) -> Result<(), String> {
+        let on = |enabled: bool, what: &str| {
+            if enabled {
+                Ok(())
+            } else {
+                Err(format!("{what} (Settings → Chat → Tools)"))
+            }
+        };
+        match tool {
+            tool if READ_TOOLS.contains(&tool) => Ok(()),
+            "web_search" | "web_fetch" => on(self.network, "Web tools are switched off"),
+            "workspace_write" | "workspace_edit" => {
+                on(self.files_write, "Changing files is switched off")
+            }
+            "run_command" => on(self.shell, "Running commands is switched off"),
+            _ => Err("tool not allowed".into()),
+        }
+    }
+
+    fn needs_approval(&self, tool: &str) -> bool {
+        match (self.ask, tool) {
+            (Ask::Never, _) => false,
+            (_, "run_command") => true,
+            (Ask::Changes, "workspace_write" | "workspace_edit") => true,
+            _ => false,
+        }
+    }
+}
+
+/// The saved policy, read from disk. Missing or unreadable ⇒ everything off.
+fn load_policy() -> Policy {
+    let Ok(dir) = crate::keys::data_root() else {
+        return Policy::default();
+    };
+    match std::fs::read_to_string(dir.join("config.json")) {
+        Ok(text) => parse_policy(&text),
+        Err(_) => Policy::default(),
+    }
+}
+
+fn parse_policy(config_text: &str) -> Policy {
+    match serde_json::from_str::<serde_json::Value>(config_text) {
+        Ok(json) => Policy::from_config(&json["tools"]),
+        Err(_) => Policy::default(),
+    }
+}
+
 /// Dispatches one validated tool call. Runs on a blocking thread; the caller
 /// enforces the time bound. Nothing here logs arguments or results.
 fn dispatch(root: &str, tool: &str, call_id: &str, args_raw: &str) -> ToolOutcome {
@@ -107,22 +235,101 @@ fn dispatch(root: &str, tool: &str, call_id: &str, args_raw: &str) -> ToolOutcom
         "workspace_list" => list(root, &args, call_id),
         "workspace_read" => read(root, &args, call_id),
         "workspace_search" => search(root, &args, call_id),
+        "workspace_write" => write(root, &args, call_id),
+        "workspace_edit" => edit(root, &args, call_id),
         _ => denied(call_id, "tool not allowed"),
     }
 }
 
-/// Entry point used by the `tool_exec` command: cancellation gate + time bound.
+/// Entry point used by the `tool_exec` command: policy gate, cancellation
+/// gate, time bound.
+///
+/// `approved` is the webview's word that the user okayed this call in the
+/// room. Rust cannot see a click, so it cannot verify that — but requiring the
+/// flag means a renderer that dispatches a gated call without asking is
+/// refused here instead of running.
 pub async fn exec(
     workspace_root: &str,
     tool: &str,
     call_id: &str,
     args_json: &str,
     stream_id: &str,
+    approved: bool,
 ) -> ToolOutcome {
+    exec_under(
+        &load_policy(),
+        workspace_root,
+        tool,
+        call_id,
+        args_json,
+        stream_id,
+        approved,
+    )
+    .await
+}
+
+async fn exec_under(
+    policy: &Policy,
+    workspace_root: &str,
+    tool: &str,
+    call_id: &str,
+    args_json: &str,
+    stream_id: &str,
+    approved: bool,
+) -> ToolOutcome {
+    if let Err(reason) = policy.allowed(tool) {
+        return denied(call_id, &reason);
+    }
+    if policy.needs_approval(tool) && !approved {
+        return denied(call_id, "this call waits for the user's approval");
+    }
     if provider::is_cancelled(stream_id) {
         return denied(call_id, "cancelled");
     }
+
+    // Web tools do their own I/O on the runtime and bound themselves; they
+    // never reach the blocking dispatcher.
+    if web::handles(tool) {
+        return match tokio::time::timeout(WEB_TIMEOUT, web::exec(tool, args_json)).await {
+            Ok(Ok((content, truncated))) => outcome(call_id, content, truncated),
+            Ok(Err(error)) => tool_error(call_id, error),
+            Err(_) => failed(call_id, "the web tool timed out"),
+        };
+    }
+    if shell::handles(tool) {
+        let cwd = match working_dir(workspace_root, args_json) {
+            Ok(cwd) => cwd,
+            Err(error) => return tool_error(call_id, error),
+        };
+        // The runner keeps the command's own limit and kills what it started;
+        // this bound only exists so a stuck runner cannot hold the call.
+        let bound = shell::outer_bound(args_json);
+        return match tokio::time::timeout(bound, shell::run(&cwd, args_json, stream_id)).await {
+            Ok(Ok((content, truncated))) => outcome(call_id, content, truncated),
+            Ok(Err(error)) => tool_error(call_id, error),
+            Err(_) => failed(
+                call_id,
+                "the command ran past its limit and could not be stopped",
+            ),
+        };
+    }
     exec_with_timeout(TOOL_TIMEOUT, workspace_root, tool, call_id, args_json).await
+}
+
+/// The folder a command runs in: the workspace, or one subfolder of it,
+/// checked the way a read is.
+fn working_dir(root_str: &str, args_raw: &str) -> Result<PathBuf, ToolError> {
+    let args: serde_json::Value = serde_json::from_str(args_raw).unwrap_or_default();
+    match args["cwd"].as_str() {
+        None | Some("") => root_canonical(root_str),
+        Some(rel) => {
+            let dir = resolve_in_workspace(root_str, rel)?;
+            if !dir.is_dir() {
+                return Err(ToolError::Failed(format!("not a folder: {rel}")));
+            }
+            Ok(dir)
+        }
+    }
 }
 
 async fn exec_with_timeout(
@@ -150,13 +357,9 @@ async fn exec_with_timeout(
 // The workspace sandbox
 // ---------------------------------------------------------------------------
 
-/// Resolves a model-supplied relative path against the workspace root.
-///
-/// Canonicalization resolves symlinks AND Windows junctions, so a link that
-/// lands outside the canonical root is rejected. Credential-like names and the
-/// BELEN data directory (DPAPI key store, config, database) are denied before
-/// anything is read.
-fn resolve_in_workspace(root_str: &str, rel: &str) -> Result<PathBuf, ToolError> {
+/// A relative path with no way up or out: not absolute, and made only of
+/// normal components (no `..`, no root, no drive or share prefix).
+fn check_relative(rel: &str) -> Result<(), ToolError> {
     if rel.is_empty() {
         return Err(ToolError::Failed("empty path".into()));
     }
@@ -167,13 +370,20 @@ fn resolve_in_workspace(root_str: &str, rel: &str) -> Result<PathBuf, ToolError>
     for component in rel_path.components() {
         match component {
             std::path::Component::Normal(_) | std::path::Component::CurDir => {}
-            _ => {
-                return Err(ToolError::Denied(
-                    "path escapes the workspace".into(),
-                ))
-            }
+            _ => return Err(ToolError::Denied("path escapes the workspace".into())),
         }
     }
+    Ok(())
+}
+
+/// Resolves a model-supplied relative path against the workspace root.
+///
+/// Canonicalization resolves symlinks AND Windows junctions, so a link that
+/// lands outside the canonical root is rejected. Credential-like names and the
+/// BELEN data directory (DPAPI key store, config, database) are denied before
+/// anything is read.
+fn resolve_in_workspace(root_str: &str, rel: &str) -> Result<PathBuf, ToolError> {
+    check_relative(rel)?;
 
     let root = std::fs::canonicalize(root_str)
         .map_err(|_| ToolError::Failed("workspace root is unavailable".into()))?;
@@ -181,6 +391,7 @@ fn resolve_in_workspace(root_str: &str, rel: &str) -> Result<PathBuf, ToolError>
         return Err(ToolError::Failed("workspace root is not a folder".into()));
     }
 
+    let rel_path = Path::new(rel);
     let target = root.join(rel_path);
     let canonical = std::fs::canonicalize(&target)
         .map_err(|_| ToolError::Failed(format!("not found: {rel}")))?;
@@ -512,6 +723,182 @@ fn walk_search(dir: &Path, depth: usize, state: &mut SearchState) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// workspace_write / workspace_edit
+// ---------------------------------------------------------------------------
+
+/// Where a write lands. Unlike `resolve_in_workspace` the file need not exist
+/// yet, so the guarantee is built from what does: the folder goes through the
+/// same canonical check a read gets (a junction or symlink leading out is
+/// caught there), and anything already at the path is followed once — a link
+/// that stays inside the workspace is fine, one that leaves, or leads
+/// nowhere, is not.
+fn resolve_write_target(root_str: &str, rel: &str) -> Result<PathBuf, ToolError> {
+    check_relative(rel)?;
+    // Refused by name first, so a credential path is refused the same way
+    // whether or not anything exists around it.
+    if is_credential_path(Path::new(rel)) {
+        return Err(ToolError::Denied(
+            "credential-like paths are denied".into(),
+        ));
+    }
+    let root = root_canonical(root_str)?;
+    let rel_path = Path::new(rel);
+
+    let parent = match rel_path.parent().and_then(|p| p.to_str()) {
+        Some("") | None => root.clone(),
+        Some(parent_rel) => {
+            let dir = resolve_in_workspace(root_str, parent_rel)?;
+            if !dir.is_dir() {
+                return Err(ToolError::Failed(format!("not a folder: {parent_rel}")));
+            }
+            dir
+        }
+    };
+    let name = rel_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| ToolError::Failed(format!("not a file path: {rel}")))?;
+    let target = parent.join(name);
+    if is_belen_data(&target) {
+        return Err(ToolError::Denied(
+            "BELEN data directory is denied".into(),
+        ));
+    }
+
+    Ok(match std::fs::symlink_metadata(&target) {
+        // Nothing there yet: this creates the file.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => target,
+        Err(e) => return Err(ToolError::Failed(format!("cannot look at {rel}: {e}"))),
+        Ok(_) => {
+            let real = std::fs::canonicalize(&target)
+                .map_err(|_| ToolError::Denied("path escapes the workspace".into()))?;
+            if !real.starts_with(&root) {
+                return Err(ToolError::Denied("path escapes the workspace".into()));
+            }
+            if !real.is_file() {
+                return Err(ToolError::Failed(format!("not a file: {rel}")));
+            }
+            real
+        }
+    })
+}
+
+/// Puts `content` at `path` the one way that cannot leave it half written:
+/// into a neighbour first, then renamed over. A failure part-way leaves the
+/// original exactly as it was and takes the neighbour with it.
+fn replace_file(path: &Path, content: &str) -> std::io::Result<()> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let neighbour = path.with_file_name(format!(".{name}.{unique}.belen-tmp"));
+    let result = std::fs::write(&neighbour, content).and_then(|()| std::fs::rename(&neighbour, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&neighbour);
+    }
+    result
+}
+
+fn write(root_str: &str, args: &serde_json::Value, call_id: &str) -> ToolOutcome {
+    let (Some(rel), Some(content)) = (args["path"].as_str(), args["content"].as_str()) else {
+        return failed(call_id, "missing required argument: path and content");
+    };
+    if content.len() > MAX_WRITE_BYTES {
+        return failed(call_id, "content is over the 256 KB limit; write a smaller file");
+    }
+    let target = match resolve_write_target(root_str, rel) {
+        Ok(path) => path,
+        Err(e) => return tool_error(call_id, e),
+    };
+    let created = !target.exists();
+    if let Err(e) = replace_file(&target, content) {
+        return failed(call_id, &format!("cannot write {rel}: {e}"));
+    }
+    outcome(
+        call_id,
+        serde_json::json!({
+            "path": rel,
+            "created": created,
+            "bytes": content.len(),
+            "lines": content.lines().count(),
+        })
+        .to_string(),
+        false,
+    )
+}
+
+fn edit(root_str: &str, args: &serde_json::Value, call_id: &str) -> ToolOutcome {
+    let (Some(rel), Some(old), Some(new)) = (
+        args["path"].as_str(),
+        args["oldText"].as_str(),
+        args["newText"].as_str(),
+    ) else {
+        return failed(call_id, "missing required argument: path, oldText and newText");
+    };
+    let everywhere = args["replaceAll"].as_bool().unwrap_or(false);
+    if old.is_empty() {
+        return failed(call_id, "oldText is empty; there is nothing to find");
+    }
+    if old.chars().count() > MAX_OLD_TEXT_CHARS || new.chars().count() > MAX_NEW_TEXT_CHARS {
+        return failed(call_id, "oldText or newText is too long; edit a smaller piece");
+    }
+    let target = match resolve_write_target(root_str, rel) {
+        Ok(path) => path,
+        Err(e) => return tool_error(call_id, e),
+    };
+    if !target.is_file() {
+        return failed(call_id, &format!("not found: {rel}"));
+    }
+    if std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0) > MAX_EDIT_FILE_BYTES {
+        return failed(call_id, "the file is over the 2 MB edit limit");
+    }
+    let text = match std::fs::read(&target).map(String::from_utf8) {
+        Ok(Ok(text)) => text,
+        Ok(Err(_)) => {
+            return failed(
+                call_id,
+                "the file is not UTF-8 text, so it cannot be edited here",
+            )
+        }
+        Err(e) => return failed(call_id, &format!("cannot read {rel}: {e}")),
+    };
+
+    // Exactly one match, or the model says so: an edit that lands in the
+    // wrong place is worse than one that does not land.
+    let found = text.matches(old).count();
+    if found == 0 {
+        return failed(call_id, &format!(
+            "oldText was not found in {rel}; read the file and copy the text exactly, whitespace and line breaks included"
+        ));
+    }
+    if found > 1 && !everywhere {
+        return failed(call_id, &format!(
+            "oldText matches {found} places in {rel}; include more of the surrounding text so it matches once, or set replaceAll"
+        ));
+    }
+    let updated = if everywhere {
+        text.replace(old, new)
+    } else {
+        text.replacen(old, new, 1)
+    };
+    if let Err(e) = replace_file(&target, &updated) {
+        return failed(call_id, &format!("cannot write {rel}: {e}"));
+    }
+    outcome(
+        call_id,
+        serde_json::json!({
+            "path": rel,
+            "replacements": if everywhere { found } else { 1 },
+            "bytesBefore": text.len(),
+            "bytesAfter": updated.len(),
+        })
+        .to_string(),
+        false,
+    )
+}
+
 fn clip_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -834,13 +1221,491 @@ mod tests {
         fs::write(ws.join("a.txt"), "content").unwrap();
 
         provider::register_stream("test-stream");
-        let out = exec(&root, "workspace_read", "c", "{\"path\":\"a.txt\"}", "test-stream").await;
+        let out = exec_under(&Policy::default(), &root, "workspace_read", "c", "{\"path\":\"a.txt\"}", "test-stream", false).await;
         assert!(out.ok, "registered stream may dispatch");
 
         provider::cancel_stream("test-stream");
-        let out = exec(&root, "workspace_read", "c2", "{\"path\":\"a.txt\"}", "test-stream").await;
+        let out = exec_under(&Policy::default(), &root, "workspace_read", "c2", "{\"path\":\"a.txt\"}", "test-stream", false).await;
         assert!(out.denied, "cancelled stream must be denied");
         assert!(out.content.contains("cancelled"));
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_dispatched_after_its_stream_ended_normally_is_not_cancelled() {
+        // The order inside the running app: the model's stream sends its last
+        // events (tool calls among them) and ends; only then does the renderer
+        // dispatch the call. A stream that ended on its own must not read as a
+        // cancelled one, or no tool call could ever run.
+        let ws = temp_workspace("ended-stream");
+        let root = canonical_str(&ws);
+        fs::write(ws.join("a.txt"), "content").unwrap();
+        let policy = Policy::default();
+
+        provider::register_stream("ended-on-its-own");
+        provider::finish_stream("ended-on-its-own");
+        let out = exec_under(&policy, &root, "workspace_read", "c", "{\"path\":\"a.txt\"}", "ended-on-its-own", false).await;
+        // (A denial reports ok too: insist on the file actually having been read.)
+        assert!(!out.denied, "a stream that finished is not a cancelled one: {}", out.content);
+        assert!(out.content.contains("content"), "{}", out.content);
+
+        // One the user did cancel still is — after it ended, while a command
+        // or an approval from that run may still be in flight.
+        provider::cancel_stream("ended-on-its-own");
+        let out = exec_under(&policy, &root, "workspace_read", "c2", "{\"path\":\"a.txt\"}", "ended-on-its-own", false).await;
+        assert!(out.denied && out.content.contains("cancelled"), "{}", out.content);
+
+        // Cancelling an id never seen before is remembered the same way, and
+        // does not touch any other stream.
+        provider::cancel_stream("never-registered");
+        assert!(provider::is_cancelled("never-registered"));
+        provider::register_stream("a-later-stream");
+        provider::finish_stream("a-later-stream");
+        let out = exec_under(&policy, &root, "workspace_read", "c3", "{\"path\":\"a.txt\"}", "a-later-stream", false).await;
+        assert!(!out.denied, "{}", out.content);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // --- Policy: the switches the broker enforces itself -------------------
+
+    const NEW_CLASS_TOOLS: [&str; 5] =
+        ["web_search", "web_fetch", "workspace_write", "workspace_edit", "run_command"];
+
+    #[test]
+    fn every_class_is_off_until_it_is_switched_on() {
+        let off = Policy::from_config(&serde_json::json!({}));
+        assert_eq!(off, Policy::default(), "no settings is the default policy");
+
+        for tool in NEW_CLASS_TOOLS {
+            let reason = off.allowed(tool).err().unwrap_or_default();
+            assert!(reason.contains("switched off"), "{tool} must be off by default");
+        }
+        for tool in READ_TOOLS {
+            assert!(off.allowed(tool).is_ok(), "{tool} is always available");
+        }
+        assert_eq!(off.allowed("run_shell").unwrap_err(), "tool not allowed");
+    }
+
+    #[test]
+    fn a_switch_enables_only_its_own_class() {
+        let web = Policy::from_config(&serde_json::json!({ "network": true }));
+        assert!(web.allowed("web_search").is_ok());
+        assert!(web.allowed("web_fetch").is_ok());
+        assert!(web.allowed("workspace_write").is_err());
+        assert!(web.allowed("run_command").is_err());
+
+        let all = Policy::from_config(
+            &serde_json::json!({ "network": true, "files": "write", "shell": true }),
+        );
+        for tool in NEW_CLASS_TOOLS {
+            assert!(all.allowed(tool).is_ok(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn values_that_are_not_the_schema_count_as_off() {
+        // "yes" is not a boolean, "editor" is not a mode, "sometimes" is not
+        // a policy: a hand-edited config never widens what may run.
+        let odd = Policy::from_config(&serde_json::json!({
+            "network": "yes", "files": "editor", "shell": 1, "askBefore": "sometimes",
+        }));
+        assert_eq!(odd, Policy::default());
+    }
+
+    #[test]
+    fn a_broken_config_leaves_everything_off() {
+        assert_eq!(parse_policy("{ not json"), Policy::default());
+        assert_eq!(parse_policy(r#"{"provider":{}}"#), Policy::default());
+        assert!(parse_policy(r#"{"tools":{"shell":true}}"#).shell);
+    }
+
+    #[test]
+    fn commands_and_file_changes_wait_for_approval_by_default() {
+        let all = Policy::from_config(
+            &serde_json::json!({ "network": true, "files": "write", "shell": true }),
+        );
+        for tool in ["run_command", "workspace_write", "workspace_edit"] {
+            assert!(all.needs_approval(tool), "{tool} must ask");
+        }
+        for tool in [
+            "web_search",
+            "web_fetch",
+            "workspace_list",
+            "workspace_read",
+            "workspace_search",
+        ] {
+            assert!(!all.needs_approval(tool), "{tool} runs on its own");
+        }
+
+        let commands_only = Policy::from_config(&serde_json::json!({ "askBefore": "commands" }));
+        assert!(commands_only.needs_approval("run_command"));
+        assert!(!commands_only.needs_approval("workspace_edit"));
+
+        let never = Policy::from_config(&serde_json::json!({ "askBefore": "never" }));
+        assert!(!never.needs_approval("run_command"));
+    }
+
+    #[tokio::test]
+    async fn the_broker_refuses_what_the_switches_did_not_allow() {
+        let ws = temp_workspace("policy");
+        let root = canonical_str(&ws);
+        fs::write(ws.join("a.txt"), "content").unwrap();
+        let off = Policy::default();
+
+        let out = exec_under(&off, &root, "web_search", "c", "{}", "", true).await;
+        assert!(out.denied);
+        assert!(out.content.contains("switched off"), "{}", out.content);
+
+        // "Never ask" is not a way to enable a class.
+        let never = Policy::from_config(&serde_json::json!({ "askBefore": "never" }));
+        let out = exec_under(&never, &root, "run_command", "c", "{}", "", true).await;
+        assert!(out.denied);
+
+        // Reads are untouched by all of it.
+        let out = exec_under(&off, &root, "workspace_read", "c", "{\"path\":\"a.txt\"}", "", false).await;
+        assert!(out.ok, "{}", out.content);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn a_gated_call_waits_for_approval_even_when_its_class_is_on() {
+        let ws = temp_workspace("approval");
+        let root = canonical_str(&ws);
+        let all = Policy::from_config(
+            &serde_json::json!({ "network": true, "files": "write", "shell": true }),
+        );
+
+        let out = exec_under(&all, &root, "run_command", "c", "{}", "", false).await;
+        assert!(out.denied);
+        assert!(out.content.contains("approval"), "{}", out.content);
+
+        let never = Policy { ask: Ask::Never, ..all };
+        let out = exec_under(&never, &root, "run_command", "c", "{}", "", false).await;
+        assert!(!out.content.contains("approval"), "{}", out.content);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // --- Web tools: refused until switched on, and the guard holds either way
+
+    #[tokio::test]
+    async fn web_tools_are_refused_until_web_is_switched_on() {
+        let out = exec_under(&Policy::default(), "/tmp", "web_fetch", "c", "{\"url\":\"https://93.184.216.34/\"}", "", false).await;
+        assert!(out.denied);
+        assert!(out.content.contains("switched off"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn a_page_on_the_local_network_is_refused_even_with_web_on() {
+        let on = Policy::from_config(&serde_json::json!({ "network": true }));
+
+        let out = exec_under(&on, "/tmp", "web_fetch", "c", "{\"url\":\"http://192.168.50.4:8888/\"}", "", false).await;
+        assert!(out.denied);
+        assert!(out.content.contains("private network"), "{}", out.content);
+
+        // Reads never wait for approval, and the flag changes nothing for them.
+        let out = exec_under(&on, "/tmp", "web_fetch", "c", "{\"url\":\"http://127.0.0.1/\"}", "", true).await;
+        assert!(out.denied);
+        assert!(out.content.contains("this computer"), "{}", out.content);
+    }
+
+    // --- workspace_write / workspace_edit -----------------------------------
+
+    fn write_on() -> Policy {
+        Policy::from_config(&serde_json::json!({ "files": "write" }))
+    }
+
+    async fn call(policy: &Policy, root: &str, tool: &str, args: &str, approved: bool) -> ToolOutcome {
+        exec_under(policy, root, tool, "c", args, "", approved).await
+    }
+
+    fn json(out: &ToolOutcome) -> serde_json::Value {
+        serde_json::from_str(&out.content).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn a_write_creates_then_replaces_a_file_in_the_workspace() {
+        let ws = temp_workspace("write");
+        let root = canonical_str(&ws);
+        fs::create_dir_all(ws.join("notes")).unwrap();
+        let on = write_on();
+
+        let out = call(&on, &root, "workspace_write", r#"{"path":"notes/hello.txt","content":"héllo\nworld\n"}"#, true).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(fs::read_to_string(ws.join("notes").join("hello.txt")).unwrap(), "héllo\nworld\n");
+        assert_eq!(json(&out)["created"], true);
+
+        let out = call(&on, &root, "workspace_write", r#"{"path":"notes/hello.txt","content":"again"}"#, true).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(fs::read_to_string(ws.join("notes").join("hello.txt")).unwrap(), "again");
+        assert_eq!(json(&out)["created"], false);
+        // The write leaves nothing of itself behind.
+        assert_eq!(listing(&ws.join("notes")), vec!["hello.txt".to_string()]);
+
+        // A missing folder is named; it is not created as a side effect.
+        let out = call(&on, &root, "workspace_write", r#"{"path":"nope/x.txt","content":"x"}"#, true).await;
+        assert!(!out.ok && !out.denied, "{}", out.content);
+        assert!(out.error.unwrap().contains("not found"));
+
+        let out = call(&on, &root, "workspace_write", r#"{"path":"notes/hello.txt"}"#, true).await;
+        assert!(out.error.unwrap().contains("missing required argument"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn file_changes_need_their_switch_and_the_users_approval() {
+        let ws = temp_workspace("write-gate");
+        let root = canonical_str(&ws);
+        fs::write(ws.join("a.txt"), "old").unwrap();
+        let read = || fs::read_to_string(ws.join("a.txt")).unwrap();
+        let args = r#"{"path":"a.txt","content":"new"}"#;
+
+        // Off: refused before anything else, approval or not.
+        let out = call(&Policy::default(), &root, "workspace_write", args, true).await;
+        assert!(out.denied && out.content.contains("switched off"), "{}", out.content);
+
+        // On but not approved: the file is untouched.
+        let out = call(&write_on(), &root, "workspace_write", args, false).await;
+        assert!(out.denied && out.content.contains("approval"), "{}", out.content);
+        assert_eq!(read(), "old");
+
+        // "Commands only" lets file changes through unasked.
+        let commands_only = Policy { ask: Ask::Commands, ..write_on() };
+        let out = call(&commands_only, &root, "workspace_write", args, false).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(read(), "new");
+
+        // An edit waits for the same approval.
+        let out = call(&write_on(), &root, "workspace_edit", r#"{"path":"a.txt","oldText":"new","newText":"newer"}"#, false).await;
+        assert!(out.denied && out.content.contains("approval"), "{}", out.content);
+        assert_eq!(read(), "new");
+
+        let out = call(&write_on(), &root, "workspace_edit", r#"{"path":"a.txt","oldText":"new","newText":"newer"}"#, true).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(read(), "newer");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn writes_stay_inside_the_workspace_and_off_credentials() {
+        let ws = temp_workspace("write-escape");
+        let root = canonical_str(&ws);
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::create_dir_all(ws.join("keys")).unwrap();
+        fs::write(ws.join(".env"), "SECRET=1").unwrap();
+        let outside = std::env::temp_dir().join("belen-write-outside.txt");
+        let _ = fs::remove_file(&outside);
+        let on = write_on();
+
+        for path in ["../belen-write-outside.txt", "sub/../../belen-write-outside.txt"] {
+            let out = call(&on, &root, "workspace_write", &format!(r#"{{"path":"{path}","content":"x"}}"#), true).await;
+            assert!(out.denied && out.content.contains("escapes"), "{}", out.content);
+            assert!(!outside.exists(), "{path} created a file outside");
+        }
+        for path in [".env", "keys/server.key", "sub/.env.local", "notes/.git-credentials", "id_rsa_backup"] {
+            let out = call(&on, &root, "workspace_write", &format!(r#"{{"path":"{path}","content":"x"}}"#), true).await;
+            assert!(out.denied && out.content.contains("credential"), "{path}: {}", out.content);
+        }
+        assert_eq!(fs::read_to_string(ws.join(".env")).unwrap(), "SECRET=1");
+
+        let absolute = format!(r#"{{"path":"{}","content":"x"}}"#, outside.display());
+        let out = call(&on, &root, "workspace_write", &absolute, true).await;
+        assert!(out.denied && out.content.contains("absolute"), "{}", out.content);
+
+        // A command runs from the workspace or a subfolder of it, never from
+        // anywhere else — and only once allowed.
+        let shell_on = Policy::from_config(&serde_json::json!({ "shell": true }));
+        let echo = r#"{"command":"echo hello-from-the-tool"}"#;
+        let out = call(&Policy::default(), &root, "run_command", echo, true).await;
+        assert!(out.denied && out.content.contains("switched off"), "{}", out.content);
+        let out = call(&shell_on, &root, "run_command", echo, false).await;
+        assert!(out.denied && out.content.contains("approval"), "{}", out.content);
+
+        for cwd in ["..", "sub/../..", "nope"] {
+            let args = format!(r#"{{"command":"echo x","cwd":"{cwd}"}}"#);
+            let out = call(&shell_on, &root, "run_command", &args, true).await;
+            assert!(!out.ok || out.error.is_some() || out.denied, "{cwd} must not run: {}", out.content);
+            assert!(out.content.contains("escapes") || out.content.contains("not found"), "{cwd}: {}", out.content);
+        }
+
+        #[cfg(unix)]
+        {
+            let out = call(&shell_on, &root, "run_command", echo, true).await;
+            assert!(out.ok && !out.denied, "{}", out.content);
+            assert!(out.content.contains("hello-from-the-tool"), "{}", out.content);
+            let args = r#"{"command":"pwd","cwd":"sub"}"#;
+            let out = call(&shell_on, &root, "run_command", args, true).await;
+            assert!(out.content.contains("sub"), "{}", out.content);
+        }
+
+        // A folder is not something a write can replace.
+        let out = call(&on, &root, "workspace_write", r#"{"path":"sub","content":"x"}"#, true).await;
+        assert!(!out.ok && !out.denied);
+        assert!(out.error.unwrap().contains("not a file"));
+        assert!(ws.join("sub").is_dir());
+
+        // An edit is fenced the same way.
+        let out = call(&on, &root, "workspace_edit", r#"{"path":".env","oldText":"SECRET","newText":"x"}"#, true).await;
+        assert!(out.denied);
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"../belen-write-outside.txt","oldText":"a","newText":"b"}"#, true).await;
+        assert!(out.denied);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// A file link inside the workspace (a symlink; on Windows this needs
+    /// Developer Mode).
+    #[cfg(any(unix, windows))]
+    fn link(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_file(target, link);
+    }
+
+    /// Links inside the workspace are followed when they stay in and refused
+    /// when they leave — including towards a file that does not exist yet,
+    /// which is exactly the case a plain "create" would have written outside.
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn a_write_follows_a_link_only_when_it_stays_inside() {
+        let ws = temp_workspace("write-link");
+        let root = canonical_str(&ws);
+        let outside = temp_workspace("write-link-outside");
+        fs::create_dir_all(ws.join("real")).unwrap();
+        fs::write(ws.join("real").join("a.txt"), "old").unwrap();
+        fs::write(outside.join("exists.txt"), "untouched").unwrap();
+        // No privilege to make links: nothing here is testable.
+        if link(&ws.join("real").join("a.txt"), &ws.join("inside.txt")).is_err() {
+            let _ = fs::remove_dir_all(&ws);
+            let _ = fs::remove_dir_all(&outside);
+            return;
+        }
+        link(&outside.join("exists.txt"), &ws.join("outside.txt")).unwrap();
+        link(&outside.join("not-yet.txt"), &ws.join("dangling.txt")).unwrap();
+        let on = write_on();
+
+        let out = call(&on, &root, "workspace_write", r#"{"path":"inside.txt","content":"new"}"#, true).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(fs::read_to_string(ws.join("real").join("a.txt")).unwrap(), "new");
+        assert!(fs::symlink_metadata(ws.join("inside.txt")).unwrap().file_type().is_symlink());
+
+        for name in ["outside.txt", "dangling.txt"] {
+            let args = format!(r#"{{"path":"{name}","content":"x"}}"#);
+            let out = call(&on, &root, "workspace_write", &args, true).await;
+            assert!(out.denied && out.content.contains("escapes"), "{name}: {}", out.content);
+        }
+        assert_eq!(fs::read_to_string(outside.join("exists.txt")).unwrap(), "untouched");
+        assert!(!outside.join("not-yet.txt").exists(), "a dangling link wrote outside");
+
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"outside.txt","oldText":"untouched","newText":"x"}"#, true).await;
+        assert!(out.denied);
+        assert_eq!(fs::read_to_string(outside.join("exists.txt")).unwrap(), "untouched");
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn an_edit_replaces_exactly_once_or_says_why_it_did_not() {
+        let ws = temp_workspace("edit");
+        let root = canonical_str(&ws);
+        fs::write(ws.join("a.txt"), "one two one two\n").unwrap();
+        let read = || fs::read_to_string(ws.join("a.txt")).unwrap();
+        let on = write_on();
+
+        // Ambiguous: it refuses to guess.
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"a.txt","oldText":"one","newText":"X"}"#, true).await;
+        assert!(!out.ok && !out.denied);
+        assert!(out.error.unwrap().contains("2 places"));
+        assert_eq!(read(), "one two one two\n");
+
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"a.txt","oldText":"one","newText":"X","replaceAll":true}"#, true).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(read(), "X two X two\n");
+        assert_eq!(json(&out)["replacements"], 2);
+
+        // Unique, and across a line break.
+        fs::write(ws.join("b.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"b.txt","oldText":"alpha\nbeta","newText":"first\nsecond"}"#, true).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(fs::read_to_string(ws.join("b.txt")).unwrap(), "first\nsecond\ngamma\n");
+        assert_eq!(json(&out)["replacements"], 1);
+
+        // A line break the file does not have is a miss, not a near-match.
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"a.txt","oldText":"X two\nX two","newText":"y"}"#, true).await;
+        assert!(out.error.unwrap().contains("not found"));
+
+        let out = call(&on, &root, "workspace_edit", r#"{"path":"a.txt","oldText":"missing","newText":"y"}"#, true).await;
+        assert!(out.error.unwrap().contains("not found"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn edits_refuse_what_they_cannot_do_safely() {
+        let ws = temp_workspace("edit-refuse");
+        let root = canonical_str(&ws);
+        let on = write_on();
+        macro_rules! edit {
+            ($args:expr) => {
+                call(&on, &root, "workspace_edit", $args, true)
+            };
+        }
+
+        let out = edit!(r#"{"path":"nope.txt","oldText":"a","newText":"b"}"#).await;
+        assert!(out.error.unwrap().contains("not found: nope.txt"));
+
+        fs::write(ws.join("bin.dat"), [0xff, 0xfe, 0x00, 0x61]).unwrap();
+        let out = edit!(r#"{"path":"bin.dat","oldText":"a","newText":"b"}"#).await;
+        assert!(out.error.unwrap().contains("UTF-8"));
+
+        let out = edit!(r#"{"path":"bin.dat","oldText":"","newText":"b"}"#).await;
+        assert!(out.error.unwrap().contains("empty"));
+
+        fs::write(ws.join("big.txt"), vec![b'a'; MAX_EDIT_FILE_BYTES as usize + 1]).unwrap();
+        let out = edit!(r#"{"path":"big.txt","oldText":"a","newText":"b"}"#).await;
+        assert!(out.error.unwrap().contains("2 MB"));
+
+        let long = "a".repeat(MAX_OLD_TEXT_CHARS + 1);
+        let out = edit!(&format!(r#"{{"path":"bin.dat","oldText":"{long}","newText":"b"}}"#)).await;
+        assert!(out.error.unwrap().contains("too long"));
+
+        let huge = "a".repeat(MAX_WRITE_BYTES + 1);
+        let out = call(&on, &root, "workspace_write", &format!(r#"{{"path":"big.txt","content":"{huge}"}}"#), true).await;
+        assert!(out.error.unwrap().contains("256 KB"));
+
+        // A file with Windows line breaks keeps them on every line but the one changed.
+        fs::write(ws.join("crlf.txt"), b"first\r\nsecond\r\nthird\r\n").unwrap();
+        let out = edit!(r#"{"path":"crlf.txt","oldText":"second","newText":"2nd"}"#).await;
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(fs::read(ws.join("crlf.txt")).unwrap(), b"first\r\n2nd\r\nthird\r\n");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_replace_leaves_no_half_written_file() {
+        let dir = temp_workspace("replace");
+        let path = dir.join("a.txt");
+        fs::write(&path, "old").unwrap();
+
+        replace_file(&path, "new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(listing(&dir), vec!["a.txt".to_string()]);
+
+        // A replace that cannot finish takes its neighbour with it.
+        let folder = dir.join("folder");
+        fs::create_dir(&folder).unwrap();
+        assert!(replace_file(&folder, "x").is_err());
+        assert_eq!(listing(&dir), vec!["a.txt".to_string(), "folder".to_string()]);
+        assert!(folder.is_dir());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

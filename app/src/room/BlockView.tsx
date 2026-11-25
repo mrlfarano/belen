@@ -1,5 +1,6 @@
 import { createSignal, Show } from 'solid-js'
 import type { Block } from './types'
+import type { Approval } from '../providers/toolLoop'
 import BuiRenderer from '../bui/Renderer'
 import BuiStreamView from '../bui/BuiStreamView'
 import { parseBui } from '../bui/schema'
@@ -10,6 +11,8 @@ export default function BlockView(props: {
   onPin: (id: string) => void
   onFork: (id: string) => void
   onCancel?: (id: string) => void
+  /** The user's answer to a tool call waiting for approval. */
+  onDecide?: (callId: string, decision: Approval) => void
 }) {
   const b = () => props.block
   const payload = () => (b().component ? parseBui(b().component) : null)
@@ -76,7 +79,7 @@ export default function BlockView(props: {
       </Show>
 
       <Show when={b().kind === 'tool'}>
-        <ToolView block={b()} />
+        <ToolView block={b()} onDecide={props.onDecide} />
       </Show>
 
       <Show when={b().kind === 'worker'}>
@@ -90,31 +93,65 @@ export default function BlockView(props: {
   )
 }
 
-/** Read-only tool activity: label, status, and a bounded result preview. */
-function ToolView(props: { block: Block }) {
-  const [open, setOpen] = createSignal(props.block.meta?.status === 'running')
+/**
+ * Tool activity in the room: label, status, a bounded result preview — and,
+ * for a call that changes something, what it would do and the user's answer.
+ */
+function ToolView(props: {
+  block: Block
+  onDecide?: (callId: string, decision: Approval) => void
+}) {
+  const status = () => props.block.meta?.status
+  // A call opens its block while it runs and while it waits for the user;
+  // the preview and buttons must not sit inside a collapsed <details>.
+  const live = () => status() === 'running' || status() === 'awaiting'
+  const [open, setOpen] = createSignal(live())
+  const awaiting = () => status() === 'awaiting' && !!props.block.meta?.callId
+  const decide = (decision: Approval) => (e: MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    props.onDecide?.(props.block.meta?.callId ?? '', decision)
+  }
 
   return (
     <details
       class="tool-block"
-      open={open()}
+      open={open() || awaiting()}
       onToggle={(e) => setOpen(e.currentTarget.open)}
     >
       <summary class="worker tool-summary">
         <span
           class="pulse tool-glyph"
           classList={{
-            ok: props.block.meta?.status === 'ok',
-            denied: props.block.meta?.status === 'denied',
-            error: props.block.meta?.status === 'error',
+            ok: status() === 'ok',
+            denied: status() === 'denied' || status() === 'awaiting',
+            error: status() === 'error',
           }}
         />
         <span class="worker-label">{props.block.meta?.label || 'tool'}</span>
-        <span class="worker-state">{props.block.meta?.status ?? 'queued'}</span>
+        <span class="worker-state">
+          {status() === 'awaiting' ? 'waiting for you' : (status() ?? 'queued')}
+        </span>
         <Show when={props.block.meta?.ms}>
           <span class="fork-mark">{props.block.meta?.ms}</span>
         </Show>
       </summary>
+      <Show when={props.block.meta?.preview}>
+        <pre class="tool-output tool-preview">{props.block.meta?.preview}</pre>
+      </Show>
+      <Show when={awaiting()}>
+        <div class="tool-approval-actions">
+          <button class="primary-action" onClick={decide('once')}>
+            Allow once
+          </button>
+          <button class="block-action" onClick={decide('session')}>
+            Allow for this session
+          </button>
+          <button class="block-action" onClick={decide('deny')}>
+            Deny
+          </button>
+        </div>
+      </Show>
       <Show when={props.block.meta?.output}>
         <p class="body worker-output tool-output">{props.block.meta?.output}</p>
       </Show>

@@ -1,9 +1,24 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import { invoke } from '@tauri-apps/api/core'
 import { knownModels, PROVIDERS } from '../providers/registry'
-import { discover, providerKey, providerOAuthKey, saveConfig, testProvider } from '../providers/client'
+import {
+  discover,
+  providerKey,
+  providerOAuthKey,
+  saveConfig,
+  searchKeyName,
+  testProvider,
+} from '../providers/client'
 import { loadOAuth } from '../providers/auth'
-import { CHAT_WIDTHS, withChatWidth, widthOf, withWorkspace } from '../providers/config'
+import {
+  ASK_BEFORE_OPTIONS,
+  CHAT_WIDTHS,
+  toolsOf,
+  withChatWidth,
+  withTools,
+  widthOf,
+  withWorkspace,
+} from '../providers/config'
 import type {
   AppConfig,
   AuthMode,
@@ -12,6 +27,7 @@ import type {
   ModelInfo,
   TestResult,
   TokenPoll,
+  ToolsConfig,
 } from '../providers/types'
 import SkillsPanel from '../skills/SkillsPanel'
 import UpdatePanel from '../update/UpdatePanel'
@@ -56,6 +72,9 @@ export default function Settings(props: Props) {
     props.initialTab ?? 'provider',
   )
   const [workspaceField, setWorkspaceField] = createSignal(props.config?.workspace ?? '')
+  const switches = () => toolsOf(props.config)
+  const [searchKey, setSearchKey] = createSignal('')
+  const [searchKeyStatus, setSearchKeyStatus] = createSignal<string | null>(null)
 
   const [oauthClientId, setOauthClientId] = createSignal('')
   const [deviceEndpoint, setDeviceEndpoint] = createSignal('')
@@ -395,7 +414,39 @@ export default function Settings(props: Props) {
     props.onChange?.(next)
   }
 
+  const loadSearchKey = async () => {
+    try {
+      const key = await invoke<string | null>('key_get', { name: searchKeyName('tavily') })
+      setSearchKey(key ?? '')
+    } catch (e) {
+      // A locked Keychain or a denied prompt must show its cause, not an empty field.
+      setSearchKeyStatus(String(e))
+    }
+  }
+
+  const changeTools = async (patch: Partial<ToolsConfig>) => {
+    const next = withTools(props.config, patch)
+    await saveConfig(next)
+    props.onChange?.(next)
+    // The key field appears with the Web switch; fill it the first time it does.
+    if (patch.network === true && !searchKey() && searchKeyStatus() === null) void loadSearchKey()
+  }
+
+  const saveSearchKey = async () => {
+    setBusy(true)
+    setSearchKeyStatus(null)
+    try {
+      await invoke('key_set', { name: searchKeyName('tavily'), value: searchKey().trim() })
+      setSearchKeyStatus('Saved.')
+    } catch (e) {
+      setSearchKeyStatus(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   onMount(() => {
+    if (props.config?.tools?.network === true) void loadSearchKey()
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') props.onClose()
     }
@@ -484,15 +535,95 @@ export default function Settings(props: Props) {
               class="field-input"
               value={workspaceField()}
               onChange={(e) => void changeWorkspace(e.currentTarget.value)}
-              placeholder="C:\path\to\workspace"
+              placeholder="C:\path\to\workspace  ·  /path/to/workspace"
               spellcheck={false}
             />
             <p class="hint-line">
-              Folder the assistant may look into with its read-only tools (list, read,
-              search). Nothing is written. Paths outside this folder and credential files
-              (.env, keys, DPAPI store) are denied by a Rust broker.
+              Folder the assistant works in with its file tools (list, read, search). Paths
+              outside it and credential files (.env, keys, the key store) are refused by a Rust
+              broker. &quot;Change files&quot; and &quot;Run commands&quot; need this folder.
             </p>
           </label>
+
+          <div class="field">
+            <span class="field-label">Tools</span>
+            <label class="tool-switch">
+              <input
+                type="checkbox"
+                checked={switches().network}
+                onChange={(e) => void changeTools({ network: e.currentTarget.checked })}
+              />
+              <span>Web: search the web and read pages</span>
+            </label>
+            <label class="tool-switch">
+              <input
+                type="checkbox"
+                checked={switches().files === 'write'}
+                onChange={(e) =>
+                  void changeTools({ files: e.currentTarget.checked ? 'write' : 'read' })
+                }
+              />
+              <span>Change files: create and edit files in the workspace</span>
+            </label>
+            <label class="tool-switch">
+              <input
+                type="checkbox"
+                checked={switches().shell}
+                onChange={(e) => void changeTools({ shell: e.currentTarget.checked })}
+              />
+              <span>Run commands: PowerShell on Windows, zsh on macOS</span>
+            </label>
+            <p class="hint-line">
+              Off until you turn them on. Commands and file changes are real: nothing is
+              sandboxed, and by default each one waits for you in the room.
+            </p>
+          </div>
+
+          <div class="field">
+            <span class="field-label">Ask before</span>
+            <For each={ASK_BEFORE_OPTIONS}>
+              {(option) => (
+                <label class="tool-switch">
+                  <input
+                    type="radio"
+                    name="ask-before"
+                    checked={switches().askBefore === option.id}
+                    onChange={() => void changeTools({ askBefore: option.id })}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              )}
+            </For>
+            <p class="hint-line">Which calls wait for you in the room before they run.</p>
+          </div>
+
+          <Show when={switches().network}>
+            <div class="field">
+              <label class="field">
+                <span class="field-label">Web search key (Tavily)</span>
+                <input
+                  class="field-input"
+                  type="password"
+                  value={searchKey()}
+                  onInput={(e) => setSearchKey(e.currentTarget.value)}
+                  placeholder="tvly-…"
+                  spellcheck={false}
+                />
+              </label>
+              <div class="settings-row">
+                <button class="block-action" onClick={saveSearchKey} disabled={busy()}>
+                  Save key
+                </button>
+                <Show when={searchKeyStatus()}>
+                  <span class="status-line">{searchKeyStatus()}</span>
+                </Show>
+              </div>
+              <p class="hint-line">
+                Without a key she can still open pages you name, but cannot search for them. Sign
+                up at tavily.com; the key is kept in the encrypted key store, like provider keys.
+              </p>
+            </div>
+          </Show>
         </Show>
 
         <Show when={tab() === 'provider'}>

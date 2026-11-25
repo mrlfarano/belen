@@ -2,6 +2,7 @@ import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid
 import { invoke } from '@tauri-apps/api/core'
 import { createRoomStore } from './store'
 import { createTokenBatcher } from './stream'
+import { clockLine } from './clock'
 import {
   WINDOW_INITIAL,
   WINDOW_STEP,
@@ -19,9 +20,18 @@ import Composer from './Composer'
 import Settings from '../settings/Settings'
 import { cancelStream, loadConfig, streamChat } from '../providers/client'
 import { resolveSpec } from '../providers/auth'
-import { createToolSession, MAX_TOOL_ROUNDS, type BrokerResult } from '../providers/toolLoop'
-import { toolsSupported, WORKSPACE_TOOLS } from '../providers/tools'
-import { widthOf } from '../providers/config'
+import {
+  afterRound,
+  createToolSession,
+  MAX_TOOL_ROUNDS,
+  nextRoundMessages,
+  type Approval,
+  type BrokerResult,
+} from '../providers/toolLoop'
+import { toolsFor } from '../providers/tools'
+import { toolsOf, widthOf } from '../providers/config'
+import { toolPrompt } from './prompt'
+import { approvalPreview } from './approval'
 import type { AppConfig, ChatMessage, ProviderSpec } from '../providers/types'
 import type { BuiPayload } from '../bui/schema'
 import { extractBui } from '../bui/extract'
@@ -105,6 +115,15 @@ export default function Room() {
   let runSeq = 0
   let liveStreamId = ''
   let liveSession: ReturnType<typeof createToolSession> | null = null
+  /** Gated calls waiting for the user in the live run, by call id. */
+  let liveApprovals: Map<string, (decision: Approval) => void> | null = null
+
+  /** A tool block in one of these states belongs to a run that is still going. */
+  const IN_FLIGHT = new Set(['queued', 'running', 'awaiting'])
+
+  /** How long a round's `done` may trail the end of its stream before the run
+   *  is written off as ended without one. */
+  const DONE_GRACE_MS = 250
 
   const chatWidth = () => widthOf(config())
 
@@ -179,6 +198,7 @@ export default function Room() {
     runSeq++
     liveSession?.cancel()
     liveSession = null
+    liveApprovals = null
     const sid = liveStreamId
     liveStreamId = ''
     // Abort the HTTP stream in Rust; late events are dropped via runSeq.
@@ -214,10 +234,11 @@ export default function Room() {
   }
 
   /**
-   * One assistant turn. When the provider supports tools and a workspace is
-   * configured, streamed tool calls are validated, dispatched through the Rust
-   * broker, and answered with structured results (matched by call id), then a
-   * follow-up round lets the model speak. Bounded by MAX_TOOL_ROUNDS.
+   * One assistant turn. When the provider supports tools and the user has
+   * switched at least one class on, streamed tool calls are validated,
+   * dispatched through the Rust broker, and answered with structured results
+   * (matched by call id), then a follow-up round lets the model speak. Bounded
+   * by MAX_TOOL_ROUNDS.
    */
   const streamReal = async () => {
     const provider = config()?.provider
@@ -238,16 +259,15 @@ export default function Room() {
     const streamId = `stream-${seq}-${Date.now()}`
 
     const workspace = config()?.workspace
-    const withTools = toolsSupported(provider.kind, workspace)
-    const tools = withTools ? WORKSPACE_TOOLS : undefined
+    // What the model is shown follows the switches; the broker re-checks them.
+    const tools = toolsFor(config(), provider.kind)
+    const withTools = tools.length > 0
     const base = history()
-    const system = withTools
-      ? [
-          systemPrompt(),
-          'The user attached a workspace. Three read-only tools are available: workspace_list, workspace_read, workspace_search. Use them when the question concerns files or code in that workspace, then answer in prose.',
-          'All tool paths are relative to the workspace root. The workspace is read-only: nothing can be created, modified or deleted through these tools.',
-        ].join(' ')
-      : systemPrompt()
+    const system = [
+      // Per send: "now" must belong to the message it rides with.
+      clockLine(),
+      [systemPrompt(), toolPrompt(config(), tools)].filter(Boolean).join(' '),
+    ].join('\n\n')
 
     const id = append('assistant', '')
     setActive(id)
@@ -255,15 +275,18 @@ export default function Room() {
 
     // call id → transcript block, so tool activity surfaces in the room.
     const toolBlocks = new Map<string, string>()
+    // Gated calls waiting for the user: call id → where the decision goes.
+    const approvals = new Map<string, (decision: Approval) => void>()
     const session = withTools
       ? createToolSession(
-          (name, argsJson, callId) =>
+          (name, argsJson, callId, approved) =>
             invoke<BrokerResult>('tool_exec', {
               workspaceRoot: workspace,
               name,
               callId,
               argsJson,
               streamId,
+              approved,
             }),
           {
             onCallStart: (callId, summary) => {
@@ -280,14 +303,35 @@ export default function Room() {
               setMeta(blockId, 'ms', `${ms} ms`)
               scheduleSave()
             },
+            requestApproval: (callId, name, args) =>
+              new Promise<Approval>((resolve) => {
+                const blockId = toolBlocks.get(callId)
+                if (!blockId) {
+                  resolve('deny')
+                  return
+                }
+                approvals.set(callId, (decision) => {
+                  approvals.delete(callId)
+                  if (decision !== 'deny') setMeta(blockId, 'status', 'running')
+                  resolve(decision)
+                })
+                setMeta(blockId, 'preview', approvalPreview(name, args))
+                setMeta(blockId, 'status', 'awaiting')
+                scheduleSave()
+              }),
           },
+          toolsOf(config()).askBefore,
         )
       : null
     liveSession = session
+    liveApprovals = approvals
     liveStreamId = streamId
 
     const doneRounds = new Set<number>()
     let rounds = 0
+    // What the current round was sent; each tool round appends its exchange.
+    // (runRound's own `messages` is the argument it is given from here.)
+    let sent = base
 
     const onDone = async (blockId: string) => {
       batcher.flush()
@@ -298,21 +342,25 @@ export default function Room() {
         append('artifact', '', { component: extracted.payload })
       }
       if (!alive()) return
-      if (!session || !session.used || session.cancelled) {
+      if (!session) {
         stopStream()
         return
       }
+      // Tools — approvals included — finish before the round is judged.
       await session.pending
       if (!alive()) return
-      if (rounds < MAX_TOOL_ROUNDS) {
-        const follow = session.extendHistory(base, extracted ? extracted.prose : streamedText)
-        const nextId = append('assistant', '')
-        setActive(nextId)
-        await runRound(follow, nextId)
+      const round = session.takeRound()
+      if (afterRound(round, rounds) !== 'again') {
+        if (round.calls.length > 0) {
+          append('system', `Paused after ${MAX_TOOL_ROUNDS} tool rounds.`)
+        }
+        stopStream()
         return
       }
-      append('system', `Paused after ${MAX_TOOL_ROUNDS} tool rounds.`)
-      stopStream()
+      sent = nextRoundMessages(sent, extracted ? extracted.prose : streamedText, round)
+      const nextId = append('assistant', '')
+      setActive(nextId)
+      await runRound(sent, nextId)
     }
 
     const runRound = async (messages: ChatMessage[], blockId: string): Promise<void> => {
@@ -328,7 +376,9 @@ export default function Room() {
           if (event.type === 'token') {
             batcher.push(event.text)
           } else if (event.type === 'toolCall') {
-            const toolBlockId = append('tool', '', { meta: { status: 'queued' } })
+            const toolBlockId = append('tool', '', {
+              meta: { status: 'queued', callId: event.callId },
+            })
             toolBlocks.set(event.callId, toolBlockId)
             void session?.handle(event)
           } else if (event.type === 'done') {
@@ -348,7 +398,13 @@ export default function Room() {
 
     try {
       await runRound(base, id)
-      if (alive() && streaming) stopStream()
+      // A round ending is not the run ending. When the model called tools,
+      // `onDone` is still waiting on them and starts the next round itself.
+      // Stopping here unconditionally, as this used to, ended the run before
+      // that round could begin — the tool result never reached the model.
+      // Only a stream that ended without reporting it is stopped from here.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, DONE_GRACE_MS))
+      if (alive() && streaming && doneRounds.size === 0) stopStream()
     } catch (e) {
       batcher.flush()
       if (alive()) {
@@ -414,6 +470,11 @@ export default function Room() {
     runs.get(id)?.cancel()
     setMeta(id, 'status', 'cancelled')
     scheduleSave()
+  }
+
+  /** The user's answer to a tool call waiting in the room. */
+  const decide = (callId: string, decision: Approval) => {
+    liveApprovals?.get(callId)?.(decision)
   }
 
   const send = (text: string) => {
@@ -673,6 +734,14 @@ export default function Room() {
           const parsed = JSON.parse(savedRoom)
           if (Array.isArray(parsed?.order) && parsed?.byId) {
             store.hydrate(parsed)
+            // A run never survives a restart: a tool caught mid-flight, or
+            // still waiting for an answer, was cut off rather than finished.
+            for (const id of room.order) {
+              const block = room.byId[id]
+              if (block?.kind === 'tool' && block.meta?.status && IN_FLIGHT.has(block.meta.status)) {
+                setMeta(id, 'status', 'interrupted')
+              }
+            }
             resetScroll()
           }
         }
@@ -749,6 +818,7 @@ export default function Room() {
                 onPin={pin}
                 onFork={forkBlock}
                 onCancel={cancelAgent}
+                onDecide={decide}
               />
             )}
           </For>

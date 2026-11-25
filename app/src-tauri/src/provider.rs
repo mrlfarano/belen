@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -130,6 +130,43 @@ fn registry() -> &'static Mutex<HashMap<String, Arc<CancelSignal>>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// How many cancelled stream ids are remembered. Ids are unique per send, and
+/// the renderer drops a cancelled run's events long before this many more
+/// sends have passed.
+const CANCELLED_MEMORY: usize = 64;
+
+/// The streams the user cancelled, oldest first.
+///
+/// A stream's registry entry is removed when it ends, however it ended — and a
+/// tool call is only ever dispatched after its stream has ended — so "no
+/// longer registered" cannot mean "cancelled". Before this list existed every
+/// tool call in the running app was refused as cancelled.
+#[derive(Default)]
+struct CancelledStreams {
+    ids: VecDeque<String>,
+}
+
+impl CancelledStreams {
+    fn remember(&mut self, id: &str) {
+        if self.contains(id) {
+            return;
+        }
+        if self.ids.len() >= CANCELLED_MEMORY {
+            self.ids.pop_front();
+        }
+        self.ids.push_back(id.to_string());
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.ids.iter().any(|known| known == id)
+    }
+}
+
+fn cancelled_streams() -> &'static Mutex<CancelledStreams> {
+    static CANCELLED: OnceLock<Mutex<CancelledStreams>> = OnceLock::new();
+    CANCELLED.get_or_init(|| Mutex::new(CancelledStreams::default()))
+}
+
 pub fn register_stream(stream_id: &str) -> Arc<CancelSignal> {
     let signal = Arc::new(CancelSignal::new());
     if !stream_id.is_empty() {
@@ -140,6 +177,9 @@ pub fn register_stream(stream_id: &str) -> Arc<CancelSignal> {
     signal
 }
 
+/// Aborts the HTTP stream registered under `stream_id` if it is still running,
+/// and remembers the id as cancelled either way: a tool call already in
+/// flight, or a command still running, checks for exactly that.
 pub fn cancel_stream(stream_id: &str) {
     if stream_id.is_empty() {
         return;
@@ -149,21 +189,24 @@ pub fn cancel_stream(stream_id: &str) {
             signal.trigger();
         }
     }
+    if let Ok(mut cancelled) = cancelled_streams().lock() {
+        cancelled.remember(stream_id);
+    }
 }
 
-/// Used by the tool broker: an id that is no longer registered was either
-/// cancelled or already finished. Empty ids (legacy callers) never cancel.
+/// Used by the tool broker and the command runner: true only for a stream the
+/// user cancelled. Empty ids (legacy callers) never count as cancelled.
 pub fn is_cancelled(stream_id: &str) -> bool {
     if stream_id.is_empty() {
         return false;
     }
-    match registry().lock() {
-        Ok(guard) => !guard.contains_key(stream_id),
+    match cancelled_streams().lock() {
+        Ok(cancelled) => cancelled.contains(stream_id),
         Err(_) => false,
     }
 }
 
-fn finish_stream(stream_id: &str) {
+pub(crate) fn finish_stream(stream_id: &str) {
     if stream_id.is_empty() {
         return;
     }
@@ -1215,5 +1258,21 @@ mod tests {
         };
         assert!(drain_lines(&mut buffer, &mut collect).unwrap());
         assert_eq!(lines, ["data: {\"a\":1}", ""]);
+    }
+
+    #[test]
+    fn a_fresh_cancel_is_remembered_and_the_list_stays_bounded() {
+        // Its own list: the shared one belongs to whichever test is running.
+        let mut cancelled = CancelledStreams::default();
+        for i in 0..600 {
+            cancelled.remember(&format!("stream-{i}"));
+        }
+        assert!(cancelled.contains("stream-599"));
+        assert!(cancelled.contains(&format!("stream-{}", 600 - CANCELLED_MEMORY)));
+        assert!(!cancelled.contains(&format!("stream-{}", 599 - CANCELLED_MEMORY)));
+
+        // Remembering the same id twice does not evict a neighbour.
+        cancelled.remember("stream-599");
+        assert!(cancelled.contains(&format!("stream-{}", 600 - CANCELLED_MEMORY)));
     }
 }

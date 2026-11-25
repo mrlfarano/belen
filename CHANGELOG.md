@@ -5,6 +5,57 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-25
+
+### Added
+
+- **Tools the user switches on** (Settings → Chat → Tools). Every one of them
+  stays off until turned on, and the Rust broker reads the switches itself for
+  each call, so nothing depends on the webview's good behaviour.
+  - **Clock.** She knows the date and the local time — one line rebuilt for
+    every send, in the room and in sub-agents. This part is always on.
+  - **Web.** `web_search` (Tavily; the key goes into the encrypted key store)
+    and `web_fetch`, which reads public http(s) pages only: loopback, private
+    and link-local addresses are refused, every redirect hop is checked again,
+    and DNS is pinned to the address that passed the check.
+  - **Change files.** `workspace_write` and `workspace_edit` inside the
+    attached workspace, behind the read tools' path rules — including through
+    symlinks and junctions, even towards a file that does not exist yet. An
+    edit replaces exactly one match or says why it did not; a write lands
+    whole or not at all.
+  - **Run commands.** `run_command` — PowerShell on Windows, zsh on macOS —
+    from the workspace or a subfolder of it. Commands run in their own
+    process group; a time limit (default 60 s, max 5 min) or `Esc` takes the
+    whole tree with them. Variables that look like credentials never reach a
+    command.
+- **Approvals in the room.** By default each command and each file change
+  waits as its own block, showing the whole command or the file's before and
+  after, with *Allow once / Allow for this session / Deny*. `Esc` is a deny.
+  Changeable under "Ask before".
+- Tool rounds per send went from 6 to 12.
+
+### Fixed
+
+- **Tool calls never ran.** The broker refused every tool call as
+  "cancelled": a stream counted as cancelled once it was no longer
+  registered, and a stream unregisters the moment the model's reply ends —
+  which is always before the renderer dispatches the call. Only streams the
+  user actually cancelled count now.
+- **The tool result never got back to the model.** The run was stopped the
+  moment the first reply's stream ended, while the tool call was only being
+  dispatched — so the follow-up round, where the model reads the result, was
+  always cancelled on arrival. The round's own completion now decides.
+- **The tool loop never ended on a final answer.** After one tool call,
+  further rounds were started until the limit ("Paused after 6 tool rounds"),
+  each rebuilding its history from the first message. A round now ends the
+  run when it makes no new calls, and each round carries the exchanges before
+  it.
+
+### Changed
+
+- The spec's "no network except the provider" gained one exception: the web
+  tools, and only while they are switched on.
+
 ## [0.3.0] — 2026-11-25
 
 ### Added

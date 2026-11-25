@@ -2,6 +2,7 @@ import { streamChat } from '../providers/client'
 import type { ChatMessage, ProviderSpec } from '../providers/types'
 import { kernel } from './runtime'
 import type { Manifest } from './types'
+import { clockLine } from '../room/clock'
 
 export type AgentHandlers = {
   onToken: (text: string) => void
@@ -68,7 +69,8 @@ export function startSubAgent(opts: Options, stream: AgentStream = streamChat): 
         opts.spec,
         opts.model,
         [...(opts.context ?? []), { role: 'user', content: opts.input }],
-        opts.manifest.instructions,
+        // Same "now" the room gets: a sub-agent has no clock of its own either.
+        [clockLine(), opts.manifest.instructions].join('\n\n'),
         (event) => {
           if (cancelled) return
 
