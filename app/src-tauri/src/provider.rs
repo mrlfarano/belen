@@ -983,9 +983,12 @@ async fn stream_google(
                                         .as_str()
                                         .unwrap_or("unknown_tool")
                                         .to_string();
-                                    let args = part["functionCall"]["args"]
-                                        .clone()
-                                        .unwrap_or(serde_json::json!({}));
+                                    let raw_args = part["functionCall"]["args"];
+                                    let args = if raw_args.is_null() {
+                                        serde_json::json!({})
+                                    } else {
+                                        raw_args.clone()
+                                    };
                                     let _ = on_event.send(StreamEvent::ToolCall {
                                         call_id: format!("call_{google_seq}"),
                                         name,
