@@ -343,7 +343,7 @@ pub fn relaunch(after_pid: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 fn wait_for_process_exit(pid: u32) {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_EVENT, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
@@ -357,7 +357,7 @@ fn wait_for_process_exit(pid: u32) {
         };
         let waited = WaitForSingleObject(handle, HANDOFF_TIMEOUT_MS);
         let _ = CloseHandle(handle);
-        if waited == WAIT_EVENT(WAIT_OBJECT_0) {
+        if waited == WAIT_OBJECT_0 {
             return;
         }
         // Timed out: the old instance is hung. Proceed anyway — the
