@@ -3,6 +3,7 @@ mod keys;
 mod oauth;
 mod perf;
 mod provider;
+mod updater;
 
 use db::SearchHit;
 
@@ -218,8 +219,39 @@ fn export_file(name: String, contents: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+async fn update_check() -> Result<updater::CheckResult, String> {
+    updater::check().await
+}
+
+#[tauri::command]
+async fn update_apply(
+    on_progress: Channel<updater::ApplyProgress>,
+    app: tauri::AppHandle,
+) -> Result<updater::UpdateInfo, String> {
+    let mut emit = move |p: updater::ApplyProgress| {
+        let _ = on_progress.send(p);
+    };
+    let info = updater::apply(&mut emit).await?;
+    updater::write_applied_note(&info.version);
+    // Spawn the new exe (it waits for this process), then exit so the handoff
+    // completes. The Ok still reaches the webview on the way down.
+    updater::relaunch(std::process::id())?;
+    app.exit(0);
+    Ok(info)
+}
+
+/// One-shot pending "you were updated" marker, consumed at boot.
+#[tauri::command]
+fn update_last() -> Result<Option<String>, String> {
+    Ok(updater::take_applied_note())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything else: clear update leftovers, and wait out a handoff
+    // (--wait-pid) so the single-instance plugin never sees two of us.
+    updater::handle_startup_args();
     perf::mark_start();
 
     tauri::Builder::default()
@@ -250,7 +282,10 @@ pub fn run() {
             room_save,
             room_load,
             room_search,
-            export_file
+            export_file,
+            update_check,
+            update_apply,
+            update_last
         ])
         .setup(|app| {
             perf::mark_setup();

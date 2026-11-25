@@ -1,1 +1,4 @@
 .zwork/
+*.private.pem
+*.exe.new
+*.exe.old

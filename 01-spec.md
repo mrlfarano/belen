@@ -166,13 +166,15 @@ A `belen perf` script fails the build on any breach.
 - **SQLite + FTS5** for rooms, blocks, settings and the catalog.
 - Files live beside the executable: `data/belen.db`, `data/config.json`, `data/keys.dpapi`.
 - Export: Markdown + JSON. Import: JSON.
-- **No account. No telemetry. No network** except the provider the user chose.
+- **No account. No telemetry. No network** except the provider the user chose —
+  and the update check, which only runs when the user asks for it (About tab
+  or palette command).
 
 ---
 
 ## 10. Non-goals for v1
 
-Mobile, web, macOS/Linux · cloud sync, accounts, sharing · third-party code plugins (manifests only) · RAG / knowledge bases · image and audio generation · auto-update.
+Mobile, web, macOS/Linux · cloud sync, accounts, sharing · third-party code plugins (manifests only) · RAG / knowledge bases · image and audio generation · unprompted update checks (updates run only on demand, from the About tab).
 
 ---
 

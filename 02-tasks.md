@@ -354,3 +354,36 @@ T01 → T03 → T06 → T07 → T09 → T10 → T13 → T15 → T17 → T19 → 
 ```
 
 Everything else can parallelise. The critical path exists because the room, the kernel and the budget gate all constrain each other.
+
+---
+
+## Post-release — self-update, on demand (2026-11-24)
+
+Deployments now flow through the app: a button checks for a newer version and
+installs it. BELEN ships as one portable exe, and Tauri's stock updater only
+runs NSIS/MSI installers on Windows — never swaps a bare exe — so this is a
+small custom updater (`src-tauri/src/updater.rs`) with Node-side signing
+(`scripts/release.mjs`).
+
+| ID | Task | Output | Evidence |
+|---|---|---|---|
+| T34 | Updater core: signed manifest check, hash-verified download, rename-based swap with rollback, `--wait-pid` restart handoff | `updater.rs` + `lib.rs` commands `update_check` / `update_apply` / `update_last` | **14/14 Rust unit tests** (run on macOS via a throwaway crate that compiles the real file: signature vectors, tamper rejection, version ordering, URL rules, swap, rollback, applied-note roundtrip) |
+| T35 | Node↔Rust signing interop + release tooling | `scripts/release.mjs` (init / sign / publish), `src-tauri/update.pubkey` committed, private key at `~/.belen/update-private.pem` | `sign` on a dummy exe produced `latest.json` (sha256 re-checked with `shasum`); **2/2 interop tests**: the Node-signed manifest verifies against the compiled key in Rust, tampering refuses |
+| T36 | About tab in Settings + palette command + applied-update notice | `update/UpdatePanel.tsx`, Settings tab, `Ctrl+K` → "Check for updates", room system block on restart | Typecheck clean; **68/68 Vitest** (4 new); build 198.91 kB JS / 62.81 kB gzip (from 195.5 / 61.9) |
+
+Design notes:
+
+- Manifest is `latest.json` on `github.com/mrlfarano/belen/releases/latest/download/`
+  — version, url, sha256, notes, and an Ed25519 signature over
+  `BELEN-UPDATE-1\n{version}\n{sha256}`. The URL is never trusted from the
+  webview: `update_apply` re-fetches and re-verifies before downloading.
+- A running exe cannot be deleted on Windows, but it can be renamed — so the
+  swap is rename → rename, with rollback if the second rename fails. The
+  restart spawns `BELEN.exe --wait-pid=<pid>` and exits; the new process waits
+  before building the Tauri app so the single-instance plugin never sees both.
+- `BELEN_UPDATE_FEED` overrides the feed for rehearsals (loopback http allowed,
+  everything else must be https); debug builds refuse to update.
+
+**Windows verification still pending** (the crate only builds on Windows):
+rename-while-running, the PID wait, and the relaunch — rehearse with a local
+feed before the first published update.

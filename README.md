@@ -45,7 +45,10 @@ Then run `%USERPROFILE%\.belen-target\debug\belen.exe`.
 | `scripts/build.ps1` | Debug build (VsDevCmd + machine overrides) |
 | `scripts/build.ps1 -Release` | Release build with LTO |
 | `scripts/build.ps1 -TauriBuild` | Portable build, no installer |
-| `scripts/build.ps1 -Test` | Rust unit tests (DPAPI) |
+| `scripts/build.ps1 -Test` | Rust unit tests (DPAPI, updater) |
+| `pnpm release init` | Create the update signing keypair (once) |
+| `pnpm release sign <BELEN.exe>` | Hash + sign the exe, write `latest.json` |
+| `pnpm release publish <exe> [json]` | Upload exe + manifest to the GitHub release |
 
 ## Architecture
 
@@ -88,6 +91,28 @@ Copy `%USERPROFILE%\.belen-target\release\belen.exe` to any folder as `BELEN.exe
 Data (`config.json`, `belen.db`, `keys/`, `exports/`) is created in `data/` beside it.
 No installer, no admin rights, no registry. The portable folder measures **9.8 MB**
 with the perf report included.
+
+## Updates
+
+BELEN updates itself, on demand: Settings → About → **Check for updates** (also in
+the `Ctrl+K` palette). The check fetches a signed `latest.json` from the GitHub
+releases, verifies it with an Ed25519 key compiled into the exe, and — after you
+confirm — downloads the new build, hash-checks it, swaps it in place and restarts.
+`data/` is never touched; debug builds refuse to update.
+
+Cutting a release:
+
+```powershell
+# once: pnpm release init  (private key lands in ~/.belen/update-private.pem)
+pnpm build
+powershell -ExecutionPolicy Bypass -File scripts/build.ps1 -TauriBuild
+pnpm release sign %USERPROFILE%\.belen-target\release\belen.exe
+pnpm release publish %USERPROFILE%\.belen-target\release\belen.exe
+```
+
+Bump the version in `package.json`, `tauri.conf.json` and `Cargo.toml` together —
+`sign` refuses to run when they disagree. `BELEN_UPDATE_FEED` points the app at any
+other feed (loopback http allowed) for local rehearsals.
 
 ## Repository layout
 

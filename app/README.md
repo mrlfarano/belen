@@ -34,7 +34,10 @@ Then run `%USERPROFILE%\.belen-target\debug\belen.exe`.
 | `scripts/build.ps1` | Debug build (VsDevCmd + machine overrides) |
 | `scripts/build.ps1 -Release` | Release build with LTO |
 | `scripts/build.ps1 -TauriBuild` | Portable build, no installer |
-| `scripts/build.ps1 -Test` | Rust unit tests (DPAPI) |
+| `scripts/build.ps1 -Test` | Rust unit tests (DPAPI, updater) |
+| `pnpm release init` | Create the update signing keypair (once) |
+| `pnpm release sign <BELEN.exe>` | Hash + sign the exe, write `latest.json` |
+| `pnpm release publish <exe> [json]` | Upload exe + manifest to the GitHub release |
 
 ## Architecture
 
@@ -48,6 +51,7 @@ Rust core
 ├── Tauri commands + channels
 ├── DPAPI key store  → data/keys/*.dpapi
 ├── data root        → data/ beside the executable
+├── updater          → signed manifest check, exe swap, restart handoff
 └── perf snapshot    → working set, exe size, boot time
 ```
 
@@ -77,6 +81,18 @@ Copy `%USERPROFILE%\.belen-target\release\belen.exe` to any folder as `BELEN.exe
 Data (`config.json`, `belen.db`, `keys/`, `exports/`) is created in `data/` beside it.
 No installer, no admin rights, no registry. The portable folder measures **9.8 MB**
 with the perf report included.
+
+## Updates
+
+The portable exe updates itself in place. Settings → About (or the `Ctrl+K`
+palette) checks a signed `latest.json` on the GitHub releases, and after
+confirmation downloads, hash-verifies and swaps the exe, then restarts through a
+`--wait-pid` handoff so the single-instance lock never rejects the new process.
+`data/` is untouched; debug builds refuse to update. The Ed25519 public key lives
+at `src-tauri/update.pubkey`; the matching private key stays outside the repo
+(`~/.belen/update-private.pem`, override with `BELEN_UPDATE_KEY`) — losing it
+means existing installs can only be updated by hand. Rehearse locally with
+`BELEN_UPDATE_FEED=http://127.0.0.1:8788/latest.json`.
 
 ## Machine-specific notes
 

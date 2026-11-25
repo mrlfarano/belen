@@ -2,6 +2,7 @@ import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid
 import { invoke } from '@tauri-apps/api/core'
 import { createRoomStore } from './store'
 import { createTokenBatcher } from './stream'
+import { lastAppliedUpdate } from '../update/update'
 import BlockView from './BlockView'
 import Composer from './Composer'
 import Settings from '../settings/Settings'
@@ -70,7 +71,7 @@ export default function Room() {
   const [autoScroll, setAutoScroll] = createSignal(true)
   const [config, setConfig] = createSignal<AppConfig | null>(null)
   const [settingsOpen, setSettingsOpen] = createSignal(false)
-  const [settingsTab, setSettingsTab] = createSignal<'provider' | 'skills'>('provider')
+  const [settingsTab, setSettingsTab] = createSignal<'provider' | 'skills' | 'about'>('provider')
   const [paletteOpen, setPaletteOpen] = createSignal(false)
   const runs = new Map<string, AgentRun>()
   let scroller: HTMLDivElement | undefined
@@ -87,6 +88,18 @@ export default function Room() {
       const json = JSON.stringify(store.snapshot())
       void invoke('room_save', { roomId: room.id, json }).catch(() => {})
     }, 500)
+  }
+
+  // Run before the updater restarts the process — the debounced save would
+  // otherwise never fire.
+  const flushSave = () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = undefined
+    }
+    if (perfMode) return
+    const json = JSON.stringify(store.snapshot())
+    void invoke('room_save', { roomId: room.id, json }).catch(() => {})
   }
 
   const applyTheme = (theme: 'light' | 'dark') => {
@@ -357,6 +370,10 @@ export default function Room() {
         setSettingsTab('skills')
         setSettingsOpen(true)
         break
+      case 'update':
+        setSettingsTab('about')
+        setSettingsOpen(true)
+        break
       case 'export-md':
         void exportRoom('md')
         break
@@ -443,6 +460,12 @@ export default function Room() {
     perfMode = await invoke<boolean>('perf_mode').catch(() => false)
 
     if (!perfMode) {
+      try {
+        const applied = await lastAppliedUpdate()
+        if (applied) append('system', `BELEN ${applied} installed.`)
+      } catch {
+        /* no pending update marker */
+      }
       try {
         const savedRoom = await invoke<string | null>('room_load', { roomId: 'room-1' })
         if (savedRoom) {
@@ -542,6 +565,8 @@ export default function Room() {
           }}
           onChange={(next) => setConfig(next)}
           initialTab={settingsTab()}
+          onBeforeRestart={flushSave}
+          autoCheck={settingsTab() === 'about'}
         />
       </Show>
 

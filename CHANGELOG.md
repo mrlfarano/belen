@@ -5,8 +5,18 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-24
+
 ### Added
 
+- **Self-update, on demand.** Settings → About (also in the `Ctrl+K` palette)
+  checks the release feed for a signed manifest, shows the new version and
+  notes, and installs after confirmation: the portable exe is hash-verified,
+  swapped in place and restarted; `data/` is untouched. Nothing checks or
+  downloads unless you click.
+- **Release tooling.** `pnpm release init / sign / publish` generates the
+  Ed25519 update keypair (private key kept outside the repo), signs the built
+  exe into `latest.json`, and uploads both to the GitHub release via `gh`.
 - MIT license; repository README with an animated demo of the room.
 
 ## [0.1.0] — 2026-11-24

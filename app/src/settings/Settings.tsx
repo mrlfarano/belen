@@ -12,6 +12,7 @@ import type {
   TokenPoll,
 } from '../providers/types'
 import SkillsPanel from '../skills/SkillsPanel'
+import UpdatePanel from '../update/UpdatePanel'
 import type { Capability } from '../skills/types'
 
 type Props = {
@@ -19,7 +20,9 @@ type Props = {
   onClose: () => void
   onSaved: (config: AppConfig) => void
   onChange?: (config: AppConfig) => void
-  initialTab?: 'provider' | 'skills'
+  initialTab?: 'provider' | 'skills' | 'about'
+  onBeforeRestart?: () => void
+  autoCheck?: boolean
 }
 
 const ENV_DEFAULTS: Record<string, string> = {
@@ -47,7 +50,7 @@ export default function Settings(props: Props) {
   const [error, setError] = createSignal<string | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
   const [test, setTest] = createSignal<TestResult | null>(null)
-  const [tab, setTab] = createSignal<'provider' | 'skills'>(
+  const [tab, setTab] = createSignal<'provider' | 'skills' | 'about'>(
     props.initialTab ?? 'provider',
   )
 
@@ -415,6 +418,12 @@ export default function Settings(props: Props) {
           >
             Skills
           </button>
+          <button
+            classList={{ active: tab() === 'about' }}
+            onClick={() => setTab('about')}
+          >
+            About
+          </button>
         </div>
 
         <Show when={tab() === 'provider'}>
@@ -676,6 +685,13 @@ export default function Settings(props: Props) {
 
         <Show when={tab() === 'skills'}>
           <SkillsPanel onChange={(ids, grants) => void onSkillsChanged(ids, grants)} />
+        </Show>
+
+        <Show when={tab() === 'about'}>
+          <UpdatePanel
+            onBeforeRestart={() => props.onBeforeRestart?.()}
+            autoCheck={props.autoCheck}
+          />
         </Show>
       </div>
     </div>

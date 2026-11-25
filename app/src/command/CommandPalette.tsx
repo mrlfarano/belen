@@ -3,6 +3,7 @@ import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid
 export type CommandId =
   | 'settings'
   | 'skills'
+  | 'update'
   | 'export-md'
   | 'export-json'
   | 'import-json'
@@ -12,6 +13,7 @@ export type CommandId =
 const COMMANDS: Array<{ id: CommandId; label: string; hint?: string }> = [
   { id: 'settings', label: 'Open settings', hint: 'provider' },
   { id: 'skills', label: 'Skills and sub-agents', hint: 'install' },
+  { id: 'update', label: 'Check for updates', hint: 'about' },
   { id: 'export-md', label: 'Export room as Markdown', hint: 'file' },
   { id: 'export-json', label: 'Export room as JSON', hint: 'file' },
   { id: 'import-json', label: 'Import room from JSON', hint: 'file' },
