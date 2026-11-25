@@ -1,0 +1,58 @@
+# Every push to main — a merged PR, or a direct push — builds both platforms on
+# HAMMER with app/scripts/build-hammer.sh: the macOS binary natively, the
+# Windows exe cross-compiled. Builds happen on HAMMER, always.
+#
+# HAMMER's runner executes code from this repository. Its only triggers are
+# pushes to main and manual dispatch — never pull_request — so a fork cannot
+# run code on the machine.
+#
+# Signing stays out of the pipeline: `pnpm release sign/publish` remains a
+# manual step, and takes the binaries from ~/builds/belen/ on HAMMER or from
+# this run's artifacts.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: hammer-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, hammer]
+    timeout-minutes: 30
+    defaults:
+      run:
+        # A login shell: node and pnpm come from the profile on this machine.
+        shell: zsh -l {0}
+    env:
+      # Outside the checkout, so `clean: true` leaves the compiled crates be.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../.belen-target
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Build macOS and Windows
+        run: zsh app/scripts/build-hammer.sh
+
+      - name: Stage binaries for release
+        run: |
+          mkdir -p artifact
+          cp ~/builds/belen/BELEN ~/builds/belen/BELEN.exe artifact/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: belen-macos
+          path: artifact/BELEN
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: belen-windows
+          path: artifact/BELEN.exe
+          retention-days: 7

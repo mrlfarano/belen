@@ -26,6 +26,10 @@ All notable changes to BELEN are documented here. The format follows
   refuses, search says so instead of coming back empty, and nothing works
   around a refusal. Searches go out at least a second apart, at most twenty a
   minute.
+- **Both platforms build on HAMMER.** Every push to `main` — a merged PR —
+  runs the `build` workflow on HAMMER's self-hosted runner: the macOS binary
+  natively, the Windows exe cross-compiled there for the first time. The
+  hosted macOS workflow and MAYA's runner workflow are gone.
 
 ### Fixed
 
