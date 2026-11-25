@@ -1,5 +1,5 @@
 import { streamChat } from '../providers/client'
-import type { ProviderSpec } from '../providers/types'
+import type { ChatMessage, ProviderSpec } from '../providers/types'
 import { kernel } from './runtime'
 import type { Manifest } from './types'
 
@@ -19,6 +19,9 @@ export type AgentStream = typeof streamChat
 type Options = {
   manifest: Manifest
   input: string
+  /** Recent room turns ahead of the input, so agents like critic can see
+   *  the answer they are meant to review. */
+  context?: ChatMessage[]
   model: string
   spec: ProviderSpec
   handlers: AgentHandlers
@@ -64,7 +67,7 @@ export function startSubAgent(opts: Options, stream: AgentStream = streamChat): 
       await stream(
         opts.spec,
         opts.model,
-        [{ role: 'user', content: opts.input }],
+        [...(opts.context ?? []), { role: 'user', content: opts.input }],
         opts.manifest.instructions,
         (event) => {
           if (cancelled) return

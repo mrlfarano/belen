@@ -20,6 +20,59 @@ const spec = {
 }
 
 describe('sub-agent run', () => {
+  it('prepends room context ahead of the input', async () => {
+    let seen: Array<{ role: string; content: string }> = []
+    const stream: AgentStream = async (_spec, _model, messages, _system, onEvent) => {
+      seen = messages
+      onEvent({ type: 'token', text: 'ok' })
+      onEvent({ type: 'done' })
+    }
+
+    const run = startSubAgent(
+      {
+        manifest,
+        input: 'review this',
+        context: [
+          { role: 'user', content: 'question' },
+          { role: 'assistant', content: 'the answer under review' },
+        ],
+        model: 'mock-fast',
+        spec,
+        handlers: { onToken: () => {}, onStatus: () => {} },
+      },
+      stream,
+    )
+    await run.finished
+
+    expect(seen).toEqual([
+      { role: 'user', content: 'question' },
+      { role: 'assistant', content: 'the answer under review' },
+      { role: 'user', content: 'review this' },
+    ])
+  })
+
+  it('sends a bare input when no context is given', async () => {
+    let seen: Array<{ role: string; content: string }> = []
+    const stream: AgentStream = async (_spec, _model, messages, _system, onEvent) => {
+      seen = messages
+      onEvent({ type: 'done' })
+    }
+
+    const run = startSubAgent(
+      {
+        manifest,
+        input: 'standalone prompt',
+        model: 'mock-fast',
+        spec,
+        handlers: { onToken: () => {}, onStatus: () => {} },
+      },
+      stream,
+    )
+    await run.finished
+
+    expect(seen).toEqual([{ role: 'user', content: 'standalone prompt' }])
+  })
+
   it('cancel disposes the run once and drops late tokens', async () => {
     let emit: ((event: StreamEvent) => void) | undefined
     let unblock: (() => void) | undefined

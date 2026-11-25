@@ -59,7 +59,7 @@ describe('tool session', () => {
 
     const history = session.extendHistory([], '')
     expect(history[1].content).toContain('error')
-    expect(history[2].toolCallId).toBe('call_x')
+    expect(history[1].toolCallId).toBe('call_x')
   })
 
   it('reports broker denials as structured denied results', async () => {

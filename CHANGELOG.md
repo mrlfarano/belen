@@ -5,6 +5,34 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-11-24
+
+### Added
+
+- **Read-only workspace tools.** Attach a workspace in Settings → Chat and the
+  model can list, read and search its files through a Rust broker (`tool_exec`)
+  — path-validated, size-capped, nothing writable. Streamed tool calls are
+  assembled by call id, arguments are validated before dispatch, and the loop
+  is bounded at six model↔tool rounds per send.
+- **Conversation width setting** in Settings → Chat (narrow / default / wide).
+- **Jump to latest ↓** button while reading history.
+
+### Fixed
+
+- Streaming stays put and stays intact: a follow-up send or Escape while an
+  answer is streaming no longer bleeds the old stream into the new reply (runs
+  are generation-guarded and aborted in Rust via `provider_cancel`), and the
+  tokens received in the last frame are kept, not dropped.
+- Auto-scroll follows streamed text as it grows, not just new blocks; a
+  ResizeObserver re-pins after late layout (components, webfonts), and reading
+  history freezes the visible window so appends never shift the page.
+- Multibyte characters split across network chunks no longer arrive as
+  mojibake — SSE lines are decoded only once complete (`drain_lines`).
+- Sub-agents now receive the recent conversation, so `/critic` actually
+  reviews BELEN's last answer instead of an empty room.
+- Worker output and long unbroken text no longer push the transcript into
+  horizontal scrolling.
+
 ## [0.2.1] — 2026-11-24
 
 ### Added

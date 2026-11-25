@@ -183,6 +183,9 @@ export default function Room() {
     liveStreamId = ''
     // Abort the HTTP stream in Rust; late events are dropped via runSeq.
     if (sid) void cancelStream(sid).catch(() => {})
+    // Keep whatever the last frame received; flush while the block is still
+    // active, or the activeId guard below would drop it.
+    batcher.flush()
     if (room.activeId) setActive(null)
     scheduleSave()
   }
@@ -390,6 +393,9 @@ export default function Room() {
     const run = startSubAgent({
       manifest,
       input,
+      // Recent turns ahead of the command, so agents like critic can see the
+      // answer they are reviewing. The command itself is re-sent as the input.
+      context: history().slice(0, -1),
       model: provider.model,
       spec,
       handlers: {
