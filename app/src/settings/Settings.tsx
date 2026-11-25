@@ -7,7 +7,6 @@ import {
   providerKey,
   providerOAuthKey,
   saveConfig,
-  searchKeyName,
   testProvider,
 } from '../providers/client'
 import { loadOAuth } from '../providers/auth'
@@ -76,8 +75,6 @@ export default function Settings(props: Props) {
   /** The workspace when the field is empty: the user's home folder. */
   const [defaultWorkspace, setDefaultWorkspace] = createSignal('')
   const switches = () => toolsOf(props.config)
-  const [searchKey, setSearchKey] = createSignal('')
-  const [searchKeyStatus, setSearchKeyStatus] = createSignal<string | null>(null)
 
   const [oauthClientId, setOauthClientId] = createSignal('')
   const [deviceEndpoint, setDeviceEndpoint] = createSignal('')
@@ -417,39 +414,13 @@ export default function Settings(props: Props) {
     props.onChange?.(next)
   }
 
-  const loadSearchKey = async () => {
-    try {
-      const key = await invoke<string | null>('key_get', { name: searchKeyName('tavily') })
-      setSearchKey(key ?? '')
-    } catch (e) {
-      // A locked Keychain or a denied prompt must show its cause, not an empty field.
-      setSearchKeyStatus(String(e))
-    }
-  }
-
   const changeTools = async (patch: Partial<ToolsConfig>) => {
     const next = withTools(props.config, patch)
     await saveConfig(next)
     props.onChange?.(next)
-    // The key field appears with the Web switch; fill it the first time it does.
-    if (patch.network === true && !searchKey() && searchKeyStatus() === null) void loadSearchKey()
-  }
-
-  const saveSearchKey = async () => {
-    setBusy(true)
-    setSearchKeyStatus(null)
-    try {
-      await invoke('key_set', { name: searchKeyName('tavily'), value: searchKey().trim() })
-      setSearchKeyStatus('Saved.')
-    } catch (e) {
-      setSearchKeyStatus(String(e))
-    } finally {
-      setBusy(false)
-    }
   }
 
   onMount(() => {
-    if (switches().network) void loadSearchKey()
     void loadDefaultWorkspace().then(
       (home) => setDefaultWorkspace(home),
       () => {},
@@ -581,7 +552,8 @@ export default function Settings(props: Props) {
               <span>Run commands: PowerShell on Windows, zsh on macOS</span>
             </label>
             <p class="hint-line">
-              On until you turn them off. Commands and file changes are real: nothing is
+              On until you turn them off. Web search needs no key: it reads Bing's results page,
+              which the engine can refuse. Commands and file changes are real: nothing is
               sandboxed, and by default each one waits for you in the room.
             </p>
           </div>
@@ -603,34 +575,6 @@ export default function Settings(props: Props) {
             </For>
             <p class="hint-line">Which calls wait for you in the room before they run.</p>
           </div>
-
-          <Show when={switches().network}>
-            <div class="field">
-              <label class="field">
-                <span class="field-label">Web search key (Tavily)</span>
-                <input
-                  class="field-input"
-                  type="password"
-                  value={searchKey()}
-                  onInput={(e) => setSearchKey(e.currentTarget.value)}
-                  placeholder="tvly-…"
-                  spellcheck={false}
-                />
-              </label>
-              <div class="settings-row">
-                <button class="block-action" onClick={saveSearchKey} disabled={busy()}>
-                  Save key
-                </button>
-                <Show when={searchKeyStatus()}>
-                  <span class="status-line">{searchKeyStatus()}</span>
-                </Show>
-              </div>
-              <p class="hint-line">
-                Without a key she can still open pages you name, but cannot search for them. Sign
-                up at tavily.com; the key is kept in the encrypted key store, like provider keys.
-              </p>
-            </div>
-          </Show>
         </Show>
 
         <Show when={tab() === 'provider'}>

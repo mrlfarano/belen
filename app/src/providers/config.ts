@@ -1,4 +1,4 @@
-import type { AppConfig, AskBefore, ChatWidth, SearchBackend, ToolsConfig } from './types'
+import type { AppConfig, AskBefore, ChatWidth, ToolsConfig } from './types'
 
 /**
  * Returns `base` with `patch` applied, preserving every unrelated section
@@ -32,7 +32,6 @@ export function withWorkspace(config: AppConfig | null, workspace: string): AppC
 export type Tools = Required<ToolsConfig>
 
 const ASK_BEFORE: AskBefore[] = ['changes', 'commands', 'never']
-const SEARCH_BACKENDS: SearchBackend[] = ['tavily']
 
 /** The "Ask before" choices, in the order Settings shows them. */
 export const ASK_BEFORE_OPTIONS: Array<{ id: AskBefore; label: string }> = [
@@ -58,7 +57,6 @@ export function toolsOf(config: AppConfig | null | undefined): Tools {
     files: broken || (!absent(tools?.files) && tools?.files !== 'write') ? 'read' : 'write',
     shell: !off(tools?.shell),
     askBefore: isOneOf(ASK_BEFORE, tools?.askBefore, 'changes'),
-    search: isOneOf(SEARCH_BACKENDS, tools?.search, 'tavily'),
   }
 }
 

@@ -20,6 +20,12 @@ All notable changes to BELEN are documented here. The format follows
 - **All seven built-in skills install themselves** before anyone has chosen
   skills in Settings → Skills, with the capabilities they need. A saved list
   is kept as it is, even an empty one.
+- **Web search needs no key.** She reads Bing's results page under the app's
+  own name instead of calling Tavily, and the Tavily key field is gone from
+  Settings. This is not an offered API: if the page changes or the engine
+  refuses, search says so instead of coming back empty, and nothing works
+  around a refusal. Searches go out at least a second apart, at most twenty a
+  minute.
 
 ### Fixed
 

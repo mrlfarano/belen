@@ -77,7 +77,6 @@ describe('tool switches', () => {
     files: 'write',
     shell: true,
     askBefore: 'changes',
-    search: 'tavily',
   } as const
   const everythingOff = { ...everythingOn, network: false, files: 'read', shell: false } as const
 

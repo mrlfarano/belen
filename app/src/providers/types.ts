@@ -115,7 +115,6 @@ export type ChatWidth = 'narrow' | 'default' | 'wide' | 'full'
 
 export type FilesAccess = 'read' | 'write'
 export type AskBefore = 'changes' | 'commands' | 'never'
-export type SearchBackend = 'tavily'
 
 /**
  * The tool switches (Settings → Chat → Tools). An absent switch is on, and a
@@ -132,7 +131,6 @@ export type ToolsConfig = {
   shell?: boolean
   /** Which calls pause for approval in the room. */
   askBefore?: AskBefore
-  search?: SearchBackend
 }
 
 export type AppConfig = {

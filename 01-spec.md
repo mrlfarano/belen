@@ -169,8 +169,8 @@ A `belen perf` script fails the build on any breach.
 - **No account. No telemetry. No network** except the provider the user chose —
   and the update check, which only runs when the user asks for it (About tab
   or palette command) — and the web tools, on unless switched off in Settings →
-  Chat → Tools: a search API called with the user's own key, and the public
-  pages the model is sent to read.
+  Chat → Tools: the search engine's results page, read under the app's own
+  name with no key, and the public pages the model is sent to read.
 
 ---
 

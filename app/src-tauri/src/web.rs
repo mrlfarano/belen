@@ -1,16 +1,19 @@
 //! Web tools: `web_search` and `web_fetch`.
 //!
-//! This is BELEN's first network use beyond the model provider and the update
-//! feed, and only once the user switches Web on (Settings → Chat → Tools), so
-//! the boundary is drawn here rather than left to the model's judgement:
-//!  - search talks to one fixed host, with the user's own key;
+//! This is BELEN's network use beyond the model provider and the update feed,
+//! and only while the user leaves Web on (Settings → Chat → Tools), so the
+//! boundary is drawn here rather than left to the model's judgement:
+//!  - search asks one fixed search engine for its results page — no key, no
+//!    account — under this app's own name, at a person's pace, and takes a
+//!    refusal as an answer;
 //!  - fetch goes to public http(s) addresses only — never this computer, the
 //!    local network, or link-local metadata services — and every redirect hop
 //!    is checked again, with DNS pinned to the address that was checked;
 //!  - a page comes back as plain text, bounded. Nothing in it is executed.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 
@@ -35,10 +38,18 @@ const USER_AGENT: &str = concat!(
 );
 const ACCEPT: &str = "text/html, text/*;q=0.9, application/xhtml+xml, application/json;q=0.8, application/xml;q=0.6, */*;q=0.1";
 
-const SEARCH_ENDPOINT: &str = "https://api.tavily.com/search";
-/// Key-store name of the search key — the same name Settings saves it under.
-const SEARCH_KEY: &str = "search-tavily";
-const NO_KEY: &str = "there is no search key yet — add a Tavily key in Settings → Chat → Tools";
+/// The search engine's results page. This is not an offered API: the page can
+/// change and the engine can refuse, and either is reported, never worked
+/// around — the app goes out under its own name and solves no challenge.
+const SEARCH_ENDPOINT: &str = "https://www.bing.com/search";
+/// Searches are spaced out and capped. A page read without an arrangement
+/// with the engine must not look like a crawler: the address that gets
+/// refused is the user's.
+const SEARCH_SPACING: Duration = Duration::from_secs(1);
+const SEARCH_BURST: usize = 20;
+const SEARCH_WINDOW: Duration = Duration::from_secs(60);
+/// When the searches went out (or will), oldest first. One list for the app.
+static SEARCHES: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
 
 pub fn handles(tool: &str) -> bool {
     matches!(tool, "web_search" | "web_fetch")
@@ -319,48 +330,21 @@ async fn read_page(response: reqwest::Response, url: &reqwest::Url) -> Result<(S
 // ---------------------------------------------------------------------------
 
 async fn search(args: &serde_json::Value) -> Result<(String, bool), ToolError> {
-    let Some(query) = args["query"].as_str() else {
+    let Some(query) = args["query"].as_str().map(str::trim) else {
         return Err(ToolError::Failed("missing required argument: query".into()));
     };
-    let key = tokio::task::spawn_blocking(|| crate::keys::get(SEARCH_KEY))
-        .await
-        .map_err(|e| ToolError::Failed(format!("the search key could not be read: {e}")))?
-        .map_err(|e| ToolError::Failed(format!("the search key could not be read: {e}")))?;
-    let key = match key {
-        Some(bytes) => Some(String::from_utf8(bytes).map_err(|_| {
-            ToolError::Failed("the search key could not be read: it is not text".into())
-        })?),
-        None => None,
-    };
-    search_with(key, query, max_results(args)).await
-}
+    if query.is_empty() {
+        return Err(ToolError::Failed("the query is empty".into()));
+    }
+    let max_results = max_results(args);
+    search_slot().await?;
 
-fn max_results(args: &serde_json::Value) -> u64 {
-    args["maxResults"].as_u64().unwrap_or(5).clamp(1, 10)
-}
-
-async fn search_with(
-    key: Option<String>,
-    query: &str,
-    max_results: u64,
-) -> Result<(String, bool), ToolError> {
-    let key = match key {
-        // Settings writes an empty string when the key is cleared.
-        Some(key) if !key.trim().is_empty() => key,
-        _ => return Err(ToolError::Failed(NO_KEY.into())),
-    };
     let client = client_builder(SEARCH_TIMEOUT)
         .build()
         .map_err(|e| ToolError::Failed(format!("the HTTP client could not be built: {e}")))?;
     let response = client
-        .post(SEARCH_ENDPOINT)
-        .bearer_auth(key)
-        .json(&serde_json::json!({
-            "query": query,
-            "max_results": max_results,
-            "search_depth": "basic",
-            "include_answer": false,
-        }))
+        .get(search_url(query)?)
+        .header(reqwest::header::ACCEPT, "text/html")
         .send()
         .await
         .map_err(|e| ToolError::Failed(format!("the search could not be reached: {e}")))?;
@@ -368,33 +352,273 @@ async fn search_with(
     let body = response
         .text()
         .await
-        .map_err(|e| ToolError::Failed(format!("the search answer could not be read: {e}")))?;
-    if !status.is_success() {
-        return Err(ToolError::Failed(format!("the search did not answer (HTTP {status})")));
+        .map_err(|e| ToolError::Failed(format!("the search page could not be read: {e}")))?;
+    // Only a full answer counts. A redirect is a consent wall and a 202 is a
+    // bot challenge: the engine asking for a person, not answering.
+    if status != reqwest::StatusCode::OK {
+        return Err(ToolError::Failed(format!(
+            "the search engine did not answer (HTTP {status})"
+        )));
     }
     Ok((results(query, max_results, &body)?, false))
 }
 
-/// One Tavily answer → the fields the model reads, within its result budget.
-fn results(query: &str, max_results: u64, body: &str) -> Result<String, ToolError> {
-    let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|_| ToolError::Failed("the search answer was not understood".into()))?;
-    let hits: Vec<serde_json::Value> = json["results"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .take(max_results as usize)
-                .map(|hit| {
-                    serde_json::json!({
-                        "title": clip(hit["title"].as_str().unwrap_or(""), 200).0,
-                        "url": clip(hit["url"].as_str().unwrap_or(""), 500).0,
-                        "snippet": clip(hit["content"].as_str().unwrap_or(""), 400).0,
-                    })
-                })
-                .collect()
+/// The search page's address for one query, with the query encoded as a form
+/// sends it.
+fn search_url(query: &str) -> Result<reqwest::Url, ToolError> {
+    let mut url = reqwest::Url::parse(SEARCH_ENDPOINT)
+        .map_err(|_| ToolError::Failed("the search address is not valid".into()))?;
+    url.query_pairs_mut().append_pair("q", query);
+    Ok(url)
+}
+
+/// Waits until one more search may go out, or says why none may right now.
+async fn search_slot() -> Result<(), ToolError> {
+    let wait = {
+        let mut searches = SEARCHES
+            .lock()
+            .map_err(|_| ToolError::Failed("the search pace could not be checked".into()))?;
+        admit(&mut searches, Instant::now()).map_err(|reason| ToolError::Failed(reason.into()))?
+    };
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+    Ok(())
+}
+
+/// Records one search at `now`, if the pace allows, and says how long to wait
+/// before sending it — zero when it may go at once. The wait is measured from
+/// the send times recorded before it, so two searches admitted together still
+/// leave a gap between them.
+fn admit(searches: &mut Vec<Instant>, now: Instant) -> Result<Duration, &'static str> {
+    searches.retain(|at| now.duration_since(*at) < SEARCH_WINDOW);
+    if searches.len() >= SEARCH_BURST {
+        return Err("that is the limit of searches in a minute — wait a moment, then search again");
+    }
+    let send = searches
+        .last()
+        .map_or(now, |last| (*last + SEARCH_SPACING).max(now));
+    searches.push(send);
+    Ok(send.duration_since(now))
+}
+
+fn max_results(args: &serde_json::Value) -> u64 {
+    args["maxResults"].as_u64().unwrap_or(5).clamp(1, 10)
+}
+
+/// One results page → the fields the model reads, within its result budget.
+fn results(query: &str, max_results: u64, page: &str) -> Result<String, ToolError> {
+    let hits: Vec<serde_json::Value> = search_page(page, max_results as usize)?
+        .into_iter()
+        .map(|hit| {
+            serde_json::json!({
+                "title": clip(&hit.title, 200).0,
+                "url": clip(&hit.url, 500).0,
+                "snippet": clip(&hit.snippet, 400).0,
+            })
         })
-        .unwrap_or_default();
+        .collect();
     Ok(serde_json::json!({ "query": query, "results": hits }).to_string())
+}
+
+/// One organic result, as the model reads it.
+struct Hit {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+const NOT_A_RESULTS_PAGE: &str = "the search engine answered with something other than results — it may be asking a person to confirm this app may search";
+
+/// The organic results of a Bing results page, in page order — never its ads.
+/// `Err` when the page carries no results list at all, so an engine that is
+/// refusing is not mistaken for a search with nothing to find.
+fn search_page(page: &str, max_results: usize) -> Result<Vec<Hit>, ToolError> {
+    let lower = page.to_ascii_lowercase();
+    if tagged(page, &lower, 0, "ol", "id", "b_results").is_none() {
+        return Err(ToolError::Failed(NOT_A_RESULTS_PAGE.into()));
+    }
+    let mut hits = Vec::new();
+    let mut from = 0;
+    while hits.len() < max_results {
+        let Some((start, _)) = tagged(page, &lower, from, "li", "class", "b_algo") else {
+            break;
+        };
+        let end = block_end(page, &lower, start);
+        if let Some(hit) = read_hit(&page[start..end]) {
+            hits.push(hit);
+        }
+        from = end.max(start + 1);
+    }
+    Ok(hits)
+}
+
+/// One result block: its title link, and the first paragraph after it.
+fn read_hit(block: &str) -> Option<Hit> {
+    let lower = block.to_ascii_lowercase();
+    let mut i = opens(&lower, 0, "h2")?;
+    let heading = take_until(block, &lower, &mut i, "h2");
+    let heading_lower = heading.to_ascii_lowercase();
+    let anchor = opens(&heading_lower, 0, "a")?;
+    let (_, _, attrs, after) = tag_at(heading, &heading_lower, anchor)?;
+    let url = bing_target(&attribute(attrs, "href")?)?;
+    let mut inner = after;
+    let title = fragment_text(take_until(heading, &heading_lower, &mut inner, "a"));
+
+    // The paragraph is the snippet; a link inside it is the page's furniture.
+    let mut snippet = String::new();
+    if let Some(paragraph) = opens(&lower, i, "p") {
+        if let Some((_, _, _, after)) = tag_at(block, &lower, paragraph) {
+            let mut rest = after;
+            snippet = fragment_text(take_until(block, &lower, &mut rest, "p"));
+        }
+    }
+    Some(Hit { title, url, snippet })
+}
+
+/// Where a result link points, from its `href` as the page writes it. Bing
+/// routes every one through its own click counter and carries the address in
+/// `u`, base64 behind an `a1` prefix.
+fn bing_target(href: &str) -> Option<String> {
+    let href = decode_entities(href);
+    if !href.contains("bing.com/ck/a") {
+        return http_address(&href);
+    }
+    let encoded = href
+        .split_once('?')?
+        .1
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("u="))?
+        .strip_prefix("a1")?;
+    http_address(&base64_url(encoded)?)
+}
+
+/// The address, if it is one the fetch tool could be allowed to open.
+fn http_address(raw: &str) -> Option<String> {
+    let url = reqwest::Url::parse(raw).ok()?;
+    (matches!(url.scheme(), "http" | "https")).then(|| url.to_string())
+}
+
+/// Base64 as Bing writes it: either alphabet, padding optional.
+fn base64_url(text: &str) -> Option<String> {
+    let (mut buffer, mut bits, mut bytes) = (0u32, 0u32, Vec::new());
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+        }
+        buffer &= (1 << bits) - 1;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Where the next `<tag>` opens — with or without attributes. `<link` is not
+/// `<li`.
+fn opens(lower: &str, from: usize, tag: &str) -> Option<usize> {
+    let needle = format!("<{tag}");
+    let mut search = from;
+    while let Some(at) = lower[search..].find(&needle) {
+        let start = search + at;
+        search = start + 1;
+        let next = lower.as_bytes().get(start + needle.len()).copied();
+        if matches!(next, None | Some(b'>')) || next.is_some_and(|c| c.is_ascii_whitespace()) {
+            return Some(start);
+        }
+    }
+    None
+}
+
+/// The tag that starts at `at`: whether it closes, its name, its attributes
+/// and where it ends.
+fn tag_at<'a>(html: &'a str, lower: &str, at: usize) -> Option<(bool, String, &'a str, usize)> {
+    let greater = lower[at..].find('>')? + at;
+    let (closing, name, attrs) = split_tag(&html[at + 1..greater]);
+    Some((closing, name, attrs, greater + 1))
+}
+
+/// Where the next `<tag>` opens carrying `value` as one of the words of
+/// `attr` (`class="b_algo first"`).
+fn tagged<'a>(
+    html: &'a str,
+    lower: &str,
+    from: usize,
+    tag: &str,
+    attr: &str,
+    value: &str,
+) -> Option<(usize, &'a str)> {
+    let mut search = from;
+    while let Some(start) = opens(lower, search, tag) {
+        search = start + 1;
+        if let Some((_, _, attrs, _)) = tag_at(html, lower, start) {
+            let carries = attribute(attrs, attr)
+                .is_some_and(|found| found.split_whitespace().any(|word| word == value));
+            if carries {
+                return Some((start, attrs));
+            }
+        }
+    }
+    None
+}
+
+/// Where the `<li>` at `start` closes, nested list items counted.
+fn block_end(html: &str, lower: &str, start: usize) -> usize {
+    let (mut depth, mut i) = (0usize, start);
+    while i < html.len() {
+        let Some(offset) = lower[i..].find('<') else {
+            break;
+        };
+        i += offset;
+        let Some((closing, name, _, end)) = tag_at(html, lower, i) else {
+            break;
+        };
+        i = end;
+        if name == "li" {
+            depth = if closing { depth.saturating_sub(1) } else { depth + 1 };
+            if depth == 0 {
+                return i;
+            }
+        }
+    }
+    html.len()
+}
+
+/// A fragment's text: tags gone, entities decoded, whitespace folded. Links
+/// are dropped whole, and with them what they wrap.
+fn fragment_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < html.len() {
+        if html.as_bytes()[i] != b'<' {
+            let end = html[i..].find('<').map_or(html.len(), |at| i + at);
+            out.push_str(&decode_entities(&html[i..end]));
+            i = end;
+            continue;
+        }
+        if lower[i..].starts_with("<!--") {
+            i += lower[i..].find("-->").map_or(html.len() - i, |at| at + 3);
+            continue;
+        }
+        let Some((closing, name, _, end)) = tag_at(html, &lower, i) else {
+            break;
+        };
+        i = end;
+        if !closing && (name == "a" || SKIP.contains(&name.as_str())) {
+            let _ = take_until(html, &lower, &mut i, &name);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -850,46 +1074,186 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_key_search_says_so_and_touches_no_network() {
-        for key in [None, Some(String::new()), Some("   ".to_string())] {
-            let err = search_with(key, "rust", 5).await.err().expect("needs a key");
-            let ToolError::Failed(reason) = err else { panic!("not a policy refusal") };
-            assert!(reason.contains("no search key"), "{reason}");
+    async fn an_empty_query_is_refused_before_any_request() {
+        for args in [serde_json::json!({}), serde_json::json!({ "query": "  " })] {
+            let err = exec("web_search", &args.to_string())
+                .await
+                .err()
+                .expect("needs a query");
+            let ToolError::Failed(reason) = err else { panic!("not a refusal") };
+            assert!(reason.contains("query"), "{reason}");
         }
     }
 
-    #[test]
-    fn a_search_answer_keeps_only_what_the_model_reads() {
-        let body = serde_json::json!({ "query": "rust", "results": [
-            { "title": "Rust lang", "url": "https://www.rust-lang.org/", "content": "A language empowering everyone.", "score": 0.9, "raw_content": "<html>huge</html>" },
-            { "title": "", "url": "https://example.org/x", "content": "Second." },
-            { "title": "Third", "url": "https://example.org/y", "content": "Third." },
-        ]})
-        .to_string();
-        let out = results("rust", 2, &body).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(value["query"], "rust");
-        let hits = value["results"].as_array().unwrap();
-        assert_eq!(hits.len(), 2, "the requested count is a cap");
-        assert_eq!(
-            hits[0],
-            serde_json::json!({ "title": "Rust lang", "url": "https://www.rust-lang.org/", "snippet": "A language empowering everyone." })
-        );
-        assert_eq!(hits[1]["title"], "", "a missing title is empty, not null");
+    // The shape of the engine's results page: two real result blocks with
+    // their tracking links shortened, one plain one, and ads where ads go.
+    const RESULTS_PAGE: &str = r##"<ol id="b_results" class=""><li class="b_ad"><h2><a href="https://www.bing.com/ck/a?&amp;u=a1aHR0cHM6Ly9hZHMuZXhhbXBsZS8&amp;ntb=1">An ad is not a result</a></h2><p>Ad copy.</p></li>
+<li class="b_algo" data-id iid=SERP.5332><div class="b_tpcn"><a class="tilk" tabindex="-1" target="_blank" href="https://www.bing.com/ck/a?!&amp;&amp;p=cee5ebbf&amp;ptn=3&amp;u=a1aHR0cHM6Ly90YWlsc2NhbGUuY29tLw&amp;ntb=1" h="ID=SERP,5115.1"><cite>https://<strong>tailscale</strong>.com</cite></a></div><h2><a target="_blank" href="https://www.bing.com/ck/a?!&amp;&amp;p=cee5ebbf&amp;ptn=3&amp;u=a1aHR0cHM6Ly90YWlsc2NhbGUuY29tLw&amp;ntb=1" h="ID=SERP,5115.2"><strong>Tailscale</strong> | Secure Connectivity for AI, IoT &amp; Multi-Cloud</a></h2><div class="b_caption"><p class="b_lineclamp2" data-rslinkclamp-iid="">From CI/CD runners across multi-cloud environments, to SaaS tools and infrastructure, Tailscale connects it all, seamlessly. Get …<a class="b_algoReadMore" target="_blank" href="https://www.bing.com/ck/a?!&amp;&amp;p=cee5ebbf&amp;u=a1aHR0cHM6Ly90YWlsc2NhbGUuY29tLw&amp;ntb=1" h="ID=SERP,5115.3">Read more</a></p></div><div elementtiming=frp.MiddleOfPage aria-hidden="true" tabindex="-1"> &nbsp; </div></li>
+<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?&amp;u=a1aHR0cHM6Ly9leGFtcGxlLm9yZy90d28_cT1hJmI9Mg&amp;ntb=1">Two &mdash; a <b>title</b>   with
+spaces</a></h2><div class="b_caption"><p>Tailscale is the zero configuration VPN.</p></div><ul class="b_sl"><li><a href="https://example.org/sub">A sub-page link is not a result</a></li></ul></li>
+<li class="b_ad"><h2><a href="https://www.bing.com/ck/a?&amp;u=a1aHR0cHM6Ly9hZHMuZXhhbXBsZS8&amp;ntb=1">Nor is this</a></h2></li>
+<li class="b_algo"><h2><a href="https://example.org/three/path">Three</a></h2><p class="b_lineclamp4">Snippet&nbsp;three &amp; more.<!-- a comment --></p></li>
+<li class="b_pag"><ul><li><a href="?q=x&amp;first=11">Next</a></li></ul></li></ol>"##;
 
-        let long = serde_json::json!({ "results": [{ "title": "t".repeat(500), "url": "u", "content": "c" }] }).to_string();
-        let value: serde_json::Value = serde_json::from_str(&results("q", 10, &long).unwrap()).unwrap();
-        assert_eq!(value["results"][0]["title"].as_str().unwrap().chars().count(), 200);
-        assert!(results("q", 5, "not json").is_err());
+    #[test]
+    fn a_results_page_becomes_title_url_and_snippet() {
+        let out = results("tailscale", 10, RESULTS_PAGE).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["query"], "tailscale");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&results("q", 5, "{}").unwrap()).unwrap()["results"],
-            serde_json::json!([]),
-            "an answer without results is an empty list, not an error"
+            value["results"],
+            serde_json::json!([
+                {
+                    "title": "Tailscale | Secure Connectivity for AI, IoT & Multi-Cloud",
+                    "url": "https://tailscale.com/",
+                    "snippet": "From CI/CD runners across multi-cloud environments, to SaaS tools and infrastructure, Tailscale connects it all, seamlessly. Get …",
+                },
+                {
+                    "title": "Two — a title with spaces",
+                    "url": "https://example.org/two?q=a&b=2",
+                    "snippet": "Tailscale is the zero configuration VPN.",
+                },
+                {
+                    "title": "Three",
+                    "url": "https://example.org/three/path",
+                    "snippet": "Snippet three & more.",
+                },
+            ]),
+            "organic results only, in page order, with links inside the snippet dropped"
         );
+
+        let capped: serde_json::Value =
+            serde_json::from_str(&results("t", 2, RESULTS_PAGE).unwrap()).unwrap();
+        assert_eq!(
+            capped["results"].as_array().unwrap().len(),
+            2,
+            "the requested count is a cap"
+        );
+    }
+
+    #[test]
+    fn long_fields_are_cut_and_a_result_with_no_address_is_skipped() {
+        let page = format!(
+            r##"<ol id="b_results"><li class="b_algo"><h2><a href="https://example.org/{}">{}</a></h2><p>{}</p></li><li class="b_algo"><h2><a href="https://www.bing.com/ck/a?&amp;u=a1not-base64!">Broken link</a></h2><p>Never read.</p></li></ol>"##,
+            "u".repeat(600),
+            "t".repeat(500),
+            "s".repeat(450)
+        );
+        assert_eq!(search_page(&page, 10).unwrap().len(), 1, "a link that does not decode is no result");
+
+        let value: serde_json::Value = serde_json::from_str(&results("q", 10, &page).unwrap()).unwrap();
+        for (field, max) in [("title", 200), ("url", 500), ("snippet", 400)] {
+            assert_eq!(
+                value["results"][0][field].as_str().unwrap().chars().count(),
+                max,
+                "{field}"
+            );
+        }
+
         assert_eq!(max_results(&serde_json::json!({})), 5);
         assert_eq!(max_results(&serde_json::json!({ "maxResults": 99 })), 10);
         assert_eq!(max_results(&serde_json::json!({ "maxResults": 0 })), 1);
         assert_eq!(max_results(&serde_json::json!({ "maxResults": "3" })), 5);
+    }
+
+    #[test]
+    fn no_results_is_an_empty_search_and_no_results_page_is_a_refusal() {
+        let none = r##"<ol id="b_results"><li class="b_no"><h1>There are no results for <strong>zzqxjkwv</strong>.</h1><ul><li>Check your spelling.</li></ul></li></ol>"##;
+        assert!(search_page(none, 5).unwrap().is_empty());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&results("zzqxjkwv", 5, none).unwrap()).unwrap()
+                ["results"],
+            serde_json::json!([]),
+            "a search with nothing to find is an empty list, not an error"
+        );
+
+        for page in [
+            "",
+            "<html><body><p>Before you continue to the search engine</p></body></html>",
+            "<ol id='other'><li class='b_algo'></li></ol>",
+        ] {
+            let err = search_page(page, 5).err().expect("not a results page");
+            let ToolError::Failed(reason) = err else { panic!("a refusal is a failure, not a denial") };
+            assert!(reason.contains("something other than results"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_link_through_the_click_counter_is_followed_to_its_address() {
+        let counter = |encoded: &str| {
+            format!("https://www.bing.com/ck/a?!&amp;&amp;p=cee5&amp;u={encoded}&amp;ntb=1")
+        };
+        assert_eq!(
+            bing_target(&counter("a1aHR0cHM6Ly90YWlsc2NhbGUuY29tLw")).as_deref(),
+            Some("https://tailscale.com/")
+        );
+        // Either alphabet, padding or none.
+        assert_eq!(
+            bing_target(&counter("a1aHR0cDovL2V4YW1wbGUub3JnL3RocmVlL3BhdGg")).as_deref(),
+            Some("http://example.org/three/path")
+        );
+        assert_eq!(
+            bing_target(&counter("a1aHR0cHM6Ly9leGFtcGxlLm9yZy90d28/cT1hJmI9Mg=")).as_deref(),
+            Some("https://example.org/two?q=a&b=2")
+        );
+        // A plain link is taken as written; anything but a web address is no result.
+        assert_eq!(
+            bing_target("https://example.org/a?b=1&amp;c=2").as_deref(),
+            Some("https://example.org/a?b=1&c=2")
+        );
+        for href in [
+            "javascript:alert(1)",
+            "/relative",
+            "ftp://example.org/x",
+            counter("a2aHR0cHM6Ly90YWlsc2NhbGUuY29tLw").as_str(),
+            counter("a1%%%").as_str(),
+            "https://www.bing.com/ck/a?ntb=1",
+        ] {
+            assert_eq!(bing_target(href), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn searches_are_spaced_and_capped() {
+        let start = Instant::now();
+        let mut searches = Vec::new();
+        assert_eq!(admit(&mut searches, start).unwrap(), Duration::ZERO);
+        // Measured from the send time before it, so three admitted at once
+        // still go out one after another.
+        assert_eq!(admit(&mut searches, start).unwrap(), SEARCH_SPACING);
+        assert_eq!(admit(&mut searches, start).unwrap(), 2 * SEARCH_SPACING);
+        assert_eq!(
+            admit(&mut searches, start + SEARCH_SPACING).unwrap(),
+            2 * SEARCH_SPACING
+        );
+
+        for _ in 4..SEARCH_BURST {
+            admit(&mut searches, start).unwrap();
+        }
+        let err = admit(&mut searches, start).unwrap_err();
+        assert!(err.contains("limit of searches"), "{err}");
+
+        // A minute after the last of them went out, none counts any more.
+        let later = start + SEARCH_WINDOW + SEARCH_BURST as u32 * SEARCH_SPACING;
+        assert_eq!(admit(&mut searches, later).unwrap(), Duration::ZERO);
+        assert_eq!(searches.len(), 1);
+    }
+
+    /// Not run with the others: it asks the real engine. For the day search
+    /// breaks — `cargo test --manifest-path app/src-tauri/Cargo.toml --
+    /// --ignored live_search`.
+    #[tokio::test]
+    #[ignore = "asks the real search engine"]
+    async fn live_search_reads_the_real_results_page() {
+        let (out, _) = search(&serde_json::json!({
+            "query": "rust programming language",
+            "maxResults": 3,
+        }))
+        .await
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["results"].as_array().unwrap().len(), 3, "{out}");
+        println!("{out}");
     }
 
     // Two hashes: the sample contains `"#top"`, which would end an r#"…"#.

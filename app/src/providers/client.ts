@@ -65,8 +65,6 @@ export function loadDefaultWorkspace(): Promise<string> {
 
 export const providerKey = (id: string) => `provider-${id}`
 export const providerOAuthKey = (id: string) => `provider-${id}-oauth`
-/** The web search key lives in the same key store as provider keys, under its own name. */
-export const searchKeyName = (backend: string) => `search-${backend}`
 
 export function loadProviderKey(id: string): Promise<string | null> {
   return invoke<string | null>('key_get', { name: providerKey(id) })
