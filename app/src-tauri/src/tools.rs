@@ -802,16 +802,28 @@ mod tests {
             fs::write(sub.join(format!("f{i}.txt")), "needle\n").unwrap();
         }
 
-        let out = exec_with_timeout(
-            Duration::from_nanos(1),
-            &root,
-            "workspace_search",
-            "c",
-            "{\"query\":\"needle\"}",
-        )
-        .await;
-        assert!(!out.ok, "expected timeout");
-        assert!(out.error.unwrap().contains("timed out"));
+        // tokio returns the future's output when it completes on its first
+        // poll, even if the deadline has already passed — and a warm cache
+        // can finish this walk inside that window (seen once on CI). The 1 ns
+        // bound only produces a timeout when the dispatch yields first, so a
+        // single attempt is racy; the property under test is that an outlived
+        // bound errors, which holds whenever the bound is enforced at all.
+        let mut timed_out = false;
+        for _ in 0..5 {
+            let out = exec_with_timeout(
+                Duration::from_nanos(1),
+                &root,
+                "workspace_search",
+                "c",
+                "{\"query\":\"needle\"}",
+            )
+            .await;
+            if !out.ok && out.error.unwrap_or_default().contains("timed out") {
+                timed_out = true;
+                break;
+            }
+        }
+        assert!(timed_out, "expected the 1 ns bound to produce a timeout");
         let _ = fs::remove_dir_all(&ws);
     }
 
