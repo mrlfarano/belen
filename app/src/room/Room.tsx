@@ -333,6 +333,7 @@ export default function Room() {
             doneRounds.add(thisRound)
             void onDone(blockId)
           } else if (event.type === 'error') {
+            batcher.flush()
             append('system', `Provider error: ${event.message}`)
             stopStream()
           }
@@ -346,6 +347,7 @@ export default function Room() {
       await runRound(base, id)
       if (alive() && streaming) stopStream()
     } catch (e) {
+      batcher.flush()
       if (alive()) {
         append('system', `Provider error: ${String(e)}`)
         stopStream()

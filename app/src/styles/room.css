@@ -1028,6 +1028,7 @@
   padding-left: 20px;
   border-left: 1px solid var(--rule);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .worker-stop {

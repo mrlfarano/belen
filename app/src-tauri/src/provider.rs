@@ -180,6 +180,30 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Pulls complete '\n'-terminated lines out of `buffer`, decoding each line
+/// only once it is whole. A multi-byte UTF-8 character split across network
+/// chunks can never straddle a newline (continuation bytes are >= 0x80), so
+/// decoding whole lines kills the per-chunk lossy-decode mojibake. Returns
+/// Ok(false) when the handler says the stream is finished ([DONE] /
+/// message_stop / channel closed); the caller stops pumping.
+fn drain_lines(
+    buffer: &mut Vec<u8>,
+    mut on_line: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<bool, String> {
+    while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+        let mut line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+        line_bytes.pop(); // the newline
+        if line_bytes.last() == Some(&b'\r') {
+            line_bytes.pop();
+        }
+        let line = String::from_utf8_lossy(&line_bytes).into_owned();
+        if !on_line(&line)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -709,7 +733,7 @@ async fn stream_openai(
     }
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut calls: BTreeMap<u64, ToolAcc> = BTreeMap::new();
 
     loop {
@@ -720,38 +744,42 @@ async fn stream_openai(
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.extend_from_slice(&chunk);
 
-                while let Some(idx) = buffer.find('\n') {
-                    let line = buffer[..idx].trim_end_matches('\r').to_string();
-                    buffer.drain(..=idx);
-
+                let mut finished = false;
+                drain_lines(&mut buffer, |line| {
                     if line.is_empty() || line.starts_with(':') {
-                        continue;
+                        return Ok(true);
                     }
                     let Some(data) = line.strip_prefix("data:") else {
-                        continue;
+                        return Ok(true);
                     };
                     let data = data.trim();
                     if data.is_empty() {
-                        continue;
+                        return Ok(true);
                     }
                     if data == "[DONE]" {
                         flush_openai_tools(&calls, &on_event);
                         let _ = on_event.send(StreamEvent::Done { usage: None });
-                        return Ok(());
+                        finished = true;
+                        return Ok(false);
                     }
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(text) = value["choices"][0]["delta"]["content"].as_str() {
                             if !text.is_empty() {
                                 if on_event.send(StreamEvent::Token { text: text.into() }).is_err() {
-                                    return Ok(());
+                                    finished = true;
+                                    return Ok(false);
                                 }
                             }
                         }
                         collect_openai_tool_delta(&value, &mut calls);
                     }
+                    Ok(true)
+                })?;
+                if finished {
+                    return Ok(());
                 }
             }
             _ = cancel.wait() => { return Err("cancelled".into()); }
@@ -799,7 +827,7 @@ async fn stream_anthropic(
     }
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut calls: BTreeMap<u64, ToolAcc> = BTreeMap::new();
 
     loop {
@@ -810,18 +838,16 @@ async fn stream_anthropic(
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.extend_from_slice(&chunk);
 
-                while let Some(idx) = buffer.find('\n') {
-                    let line = buffer[..idx].trim_end_matches('\r').to_string();
-                    buffer.drain(..=idx);
-
+                let mut finished = false;
+                drain_lines(&mut buffer, |line| {
                     let Some(data) = line.strip_prefix("data:") else {
-                        continue;
+                        return Ok(true);
                     };
                     let data = data.trim();
                     if data.is_empty() {
-                        continue;
+                        return Ok(true);
                     }
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
@@ -840,7 +866,8 @@ async fn stream_anthropic(
                                 if let Some(text) = value["delta"]["text"].as_str() {
                                     if !text.is_empty() {
                                         if on_event.send(StreamEvent::Token { text: text.into() }).is_err() {
-                                            return Ok(());
+                                            finished = true;
+                                            return Ok(false);
                                         }
                                     }
                                 }
@@ -865,11 +892,16 @@ async fn stream_anthropic(
                             }
                             "message_stop" => {
                                 let _ = on_event.send(StreamEvent::Done { usage: None });
-                                return Ok(());
+                                finished = true;
+                                return Ok(false);
                             }
                             _ => {}
                         }
                     }
+                    Ok(true)
+                })?;
+                if finished {
+                    return Ok(());
                 }
             }
             _ = cancel.wait() => { return Err("cancelled".into()); }
@@ -911,7 +943,7 @@ async fn stream_google(
     }
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut google_seq: u64 = 0;
 
     loop {
@@ -922,18 +954,16 @@ async fn stream_google(
             chunk = stream.next() => {
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|e| e.to_string())?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.extend_from_slice(&chunk);
 
-                while let Some(idx) = buffer.find('\n') {
-                    let line = buffer[..idx].trim_end_matches('\r').to_string();
-                    buffer.drain(..=idx);
-
+                let mut finished = false;
+                drain_lines(&mut buffer, |line| {
                     let Some(data) = line.strip_prefix("data:") else {
-                        continue;
+                        return Ok(true);
                     };
                     let data = data.trim();
                     if data.is_empty() {
-                        continue;
+                        return Ok(true);
                     }
 
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
@@ -942,7 +972,8 @@ async fn stream_google(
                                 if let Some(text) = part["text"].as_str() {
                                     if !text.is_empty() {
                                         if on_event.send(StreamEvent::Token { text: text.into() }).is_err() {
-                                            return Ok(());
+                                            finished = true;
+                                            return Ok(false);
                                         }
                                     }
                                 }
@@ -965,6 +996,10 @@ async fn stream_google(
                             }
                         }
                     }
+                    Ok(true)
+                })?;
+                if finished {
+                    return Ok(());
                 }
             }
             _ = cancel.wait() => { return Err("cancelled".into()); }
@@ -1118,5 +1153,65 @@ mod tests {
         assert!(!signal.cancelled.load(Ordering::Acquire));
         signal.trigger();
         assert!(signal.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn drain_lines_decodes_split_multibyte_chars() {
+        // A chunk boundary lands inside the 2-byte 'é' sequence. Decoding
+        // whole lines must reconstruct it; per-chunk lossy decode would
+        // produce two U+FFFD replacement characters.
+        let payload = "data: {\"content\":\"héllo wörld — ok\"}\ndata: {\"content\":\"second\"}\n";
+        let bytes = payload.as_bytes();
+        let split_inside_e = payload.find("é").unwrap() + 1;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        let mut collect = |line: &str| -> Result<bool, String> {
+            lines.push(line.to_string());
+            Ok(true)
+        };
+
+        buffer.extend_from_slice(&bytes[..split_inside_e]);
+        assert!(drain_lines(&mut buffer, &mut collect).unwrap());
+        buffer.extend_from_slice(&bytes[split_inside_e..]);
+        assert!(drain_lines(&mut buffer, &mut collect).unwrap());
+        assert!(buffer.is_empty(), "whole lines are consumed");
+
+        assert_eq!(lines.len(), 2);
+        assert!(!lines[0].contains('\u{FFFD}'), "no mojibake: {}", lines[0]);
+        assert!(lines[0].contains("héllo wörld — ok"));
+        assert!(lines[1].contains("second"));
+    }
+
+    #[test]
+    fn drain_lines_stops_when_the_handler_finishes() {
+        let mut buffer: Vec<u8> = b"one\ntwo\nthree\n".to_vec();
+        let mut seen: Vec<String> = Vec::new();
+        let stop = |line: &str| -> Result<bool, String> {
+            seen.push(line.to_string());
+            Ok(seen.len() < 2)
+        };
+        assert!(!drain_lines(&mut buffer, stop).unwrap(), "handler said stop");
+        assert_eq!(seen, ["one", "two"]);
+        // 'three' stays buffered for the next pump.
+        let mut rest: Vec<String> = Vec::new();
+        let mut collect = |line: &str| -> Result<bool, String> {
+            rest.push(line.to_string());
+            Ok(true)
+        };
+        assert!(drain_lines(&mut buffer, &mut collect).unwrap());
+        assert_eq!(rest, ["three"]);
+    }
+
+    #[test]
+    fn drain_lines_trims_crlf() {
+        let mut buffer: Vec<u8> = b"data: {\"a\":1}\r\n\r\n".to_vec();
+        let mut lines: Vec<String> = Vec::new();
+        let mut collect = |line: &str| -> Result<bool, String> {
+            lines.push(line.to_string());
+            Ok(true)
+        };
+        assert!(drain_lines(&mut buffer, &mut collect).unwrap());
+        assert_eq!(lines, ["data: {\"a\":1}", ""]);
     }
 }
