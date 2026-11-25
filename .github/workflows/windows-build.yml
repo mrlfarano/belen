@@ -33,10 +33,12 @@ jobs:
 
       - name: Build portable exe
         shell: powershell
+        working-directory: app
         run: powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -TauriBuild
 
       - name: Stage exe for testing
         shell: powershell
+        working-directory: app
         run: |
           $exe = Join-Path $env:USERPROFILE '.belen-target\release\belen.exe'
           if (-not (Test-Path $exe)) { throw "build produced no exe at $exe" }
