@@ -1,0 +1,88 @@
+# Dev-loop build for macOS: every push to main builds the portable Apple
+# Silicon binary on a GitHub-hosted runner, mirroring windows-build.yml.
+#
+# The only triggers are pushes to main by repo collaborators and manual
+# dispatch (no pull_request), like the Windows build.
+#
+# Plain commands, no wrapper script: macOS has none of the build machine's
+# traps that scripts\build.ps1 works around on MAYA. Unlike the Windows build
+# this job also runs the frontend gates and the Rust tests. Signing stays out
+# of the pipeline: `pnpm release sign/publish` remains a manual step on HAMMER.
+
+name: macos build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-build
+  cancel-in-progress: true
+
+env:
+  # Without this the binary inherits the runner's OS version as its minimum.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  build:
+    runs-on: macos-15          # arm64; GitHub retires images, so bump when it does
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: app/package.json   # reads packageManager: pnpm@12.3.4
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - name: Frontend gates
+        # Before cargo test: it compiles generate_context!, which embeds
+        # dist/, so the frontend must be built first.
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
+      - name: Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build portable binary
+        run: pnpm tauri build --no-bundle
+
+      - name: Stage binary for release
+        # Upload paths resolve from the workspace root (defaults.run only
+        # moves run: steps into app/), so the copy goes to ../artifact.
+        run: |
+          bin=src-tauri/target/release/belen
+          if [ ! -f "$bin" ]; then
+            echo "build produced no binary at $bin"
+            exit 1
+          fi
+          mkdir -p ../artifact
+          cp "$bin" ../artifact/BELEN
+          chmod +x ../artifact/BELEN
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "BELEN $version built for macOS."
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: belen-macos
+          path: artifact/BELEN
+          retention-days: 7
