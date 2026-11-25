@@ -290,7 +290,7 @@ fn swap(exe: &Path, new_path: &Path, old_path: &Path) -> Result<(), String> {
 
 /// Record what the next launch should report. The marker doubles as the user's
 /// visible confirmation that the whole update loop worked.
-fn write_applied_note(version: &str) {
+pub fn write_applied_note(version: &str) {
     if let Ok(root) = crate::keys::data_root() {
         let note = serde_json::json!({ "version": version, "appliedAt": now_millis() });
         let _ = fs::write(root.join("update.json"), note.to_string());
@@ -343,9 +343,9 @@ pub fn relaunch(after_pid: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 fn wait_for_process_exit(pid: u32) {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_EVENT, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, WAIT_EVENT,
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
 
     const HANDOFF_TIMEOUT_MS: u32 = 30_000;
