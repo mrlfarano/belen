@@ -253,9 +253,11 @@ name = "belen"
 version = "0.2.2"
 dependencies = [
  "futures-util",
+ "libc",
  "reqwest",
  "ring",
  "rusqlite",
+ "security-framework",
  "semver",
  "serde",
  "serde_json",

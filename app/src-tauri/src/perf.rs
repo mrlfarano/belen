@@ -1,7 +1,9 @@
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+#[cfg(windows)]
 use windows::Win32::System::Threading::GetCurrentProcess;
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -29,6 +31,7 @@ pub fn mark_setup() {
     let _ = SETUP_MS.set(since_start_ms());
 }
 
+#[cfg(windows)]
 pub fn working_set_bytes() -> u64 {
     unsafe {
         let mut pmc = PROCESS_MEMORY_COUNTERS::default();
@@ -39,6 +42,25 @@ pub fn working_set_bytes() -> u64 {
         );
         if ok.is_ok() {
             pmc.WorkingSetSize as u64
+        } else {
+            0
+        }
+    }
+}
+
+/// Same meaning as the Windows working set: the main process' resident pages.
+/// The webview content process is separate, as on Windows.
+#[cfg(target_os = "macos")]
+pub fn working_set_bytes() -> u64 {
+    unsafe {
+        let mut info: libc::rusage_info_v4 = std::mem::zeroed();
+        let ok = libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V4,
+            &mut info as *mut libc::rusage_info_v4 as *mut libc::rusage_info_t,
+        );
+        if ok == 0 {
+            info.ri_resident_size
         } else {
             0
         }

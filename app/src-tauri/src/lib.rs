@@ -335,7 +335,7 @@ pub fn run() {
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().cloned().unwrap())
                 .menu(&menu)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(cfg!(target_os = "macos"))
                 .on_menu_event(|app, event| match event.id.0.as_str() {
                     "show" => show_window(app),
                     "quit" => app.exit(0),
@@ -351,6 +351,15 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running BELEN");
+        .build(tauri::generate_context!())
+        .expect("error while building BELEN")
+        .run(|_app, _event| {
+            // A Dock-icon click on a hidden window reopens it. Names carry a
+            // leading underscore so Windows, where the closure stays empty,
+            // compiles without unused-variable warnings.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_window(_app);
+            }
+        });
 }

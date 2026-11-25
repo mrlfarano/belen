@@ -1,9 +1,19 @@
 use std::{fs, path::PathBuf};
 
+#[cfg(windows)]
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
+#[cfg(windows)]
 use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
+
+/// Keychain service all BELEN keys live under (macOS).
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "dev.belen.desktop";
+
+/// `errSecItemNotFound` — no keychain item under this service/account.
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
 /// `data/` lives beside the executable unless `BELEN_DATA_DIR` overrides it.
 pub fn data_root() -> Result<PathBuf, String> {
@@ -22,9 +32,9 @@ pub fn data_root() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn key_path(name: &str) -> Result<PathBuf, String> {
-    // Key ids historically used `provider:<id>`; `:` is illegal in Windows file
-    // names, which made every API-key save fail. Normalise to `-`.
+/// Key ids historically used `provider:<id>`; `:` is illegal in Windows file
+/// names, which made every API-key save fail. Normalise to `-`.
+fn normalize_key_name(name: &str) -> Result<String, String> {
     let normalized = name.replace(':', "-");
 
     if normalized.is_empty()
@@ -35,17 +45,16 @@ fn key_path(name: &str) -> Result<PathBuf, String> {
         return Err(format!("invalid key name: {name}"));
     }
 
-    let root = data_root()?;
-    let dir = root.join("keys");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join(format!("{normalized}.dpapi")))
+    Ok(normalized)
 }
 
+#[cfg(windows)]
 pub fn set(name: &str, value: &[u8]) -> Result<(), String> {
     let blob = protect(value)?;
     fs::write(key_path(name)?, blob).map_err(|e| e.to_string())
 }
 
+#[cfg(windows)]
 pub fn get(name: &str) -> Result<Option<Vec<u8>>, String> {
     let path = key_path(name)?;
     if !path.exists() {
@@ -55,6 +64,46 @@ pub fn get(name: &str) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(unprotect(&blob)?))
 }
 
+#[cfg(target_os = "macos")]
+pub fn set(name: &str, value: &[u8]) -> Result<(), String> {
+    let account = normalize_key_name(name)?;
+    // The Keychain silently ignores an update that writes an empty password
+    // (clearOAuth saves ""), so replace the item instead of updating it.
+    if value.is_empty() {
+        let _ = security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, &account);
+    }
+    security_framework::passwords::set_generic_password(KEYCHAIN_SERVICE, &account, value)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub fn get(name: &str) -> Result<Option<Vec<u8>>, String> {
+    let account = normalize_key_name(name)?;
+    match security_framework::passwords::generic_password(
+        security_framework::passwords::PasswordOptions::new_generic_password(
+            KEYCHAIN_SERVICE,
+            &account,
+        ),
+    ) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+        // Anything else — including a denied Keychain prompt — is a real
+        // error; the UI must be able to show the cause, not "not connected".
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn key_path(name: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_key_name(name)?;
+
+    let root = data_root()?;
+    let dir = root.join("keys");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{normalized}.dpapi")))
+}
+
+#[cfg(windows)]
 fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
@@ -74,6 +123,7 @@ fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+#[cfg(windows)]
 fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
@@ -97,6 +147,7 @@ fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn dpapi_roundtrip() {
         let dir = std::env::temp_dir().join("belen-keytest");
@@ -109,6 +160,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(windows)]
     #[test]
     fn colon_names_normalize() {
         let path = key_path("provider:zai:oauth").expect("normalise");
@@ -117,6 +169,58 @@ mod tests {
             "unexpected path: {}",
             path.display()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_roundtrip() {
+        // Unique per run so reruns never collide with a leftover item.
+        let account = format!(
+            "belen-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        // Deletes the item even if an assertion below panics.
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ =
+                    security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, &self.0);
+            }
+        }
+        let _cleanup = Cleanup(account.clone());
+
+        set(&account, b"sk-secret-123").expect("set");
+        let got = get(&account).expect("get").expect("value");
+        assert_eq!(got, b"sk-secret-123");
+
+        // Overwrite: clearOAuth writes "", and an empty value must come back
+        // as empty, not absent.
+        set(&account, b"").expect("set empty");
+        let empty = get(&account).expect("get empty").expect("value");
+        assert!(empty.is_empty(), "empty value must round-trip, got {empty:?}");
+
+        security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, &account)
+            .expect("delete");
+        assert!(get(&account).expect("get after delete").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_names_normalize() {
+        set("provider:zai:oauth", b"token").expect("set via colon name");
+        let got = get("provider-zai-oauth")
+            .expect("get via normalised name")
+            .expect("value");
+        assert_eq!(got, b"token");
+        let _ = security_framework::passwords::delete_generic_password(
+            KEYCHAIN_SERVICE,
+            "provider-zai-oauth",
+        );
+        assert!(normalize_key_name("bad name!").is_err());
     }
 
     #[test]

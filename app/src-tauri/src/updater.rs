@@ -13,7 +13,7 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -24,10 +24,24 @@ use serde::{Deserialize, Serialize};
 
 /// Stable asset URL of the newest release. `BELEN_UPDATE_FEED` overrides it so
 /// a local rehearsal can serve the manifest from loopback (http is allowed
-/// there; every other host must be https).
+/// there; every other host must be https). Separate feeds per platform so a
+/// Windows install can never be handed a macOS binary.
+#[cfg(windows)]
 pub const DEFAULT_FEED: &str =
     "https://github.com/mrlfarano/belen/releases/latest/download/latest.json";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_FEED: &str =
+    "https://github.com/mrlfarano/belen/releases/latest/download/latest-macos.json";
 pub const RELEASE_PAGE: &str = "https://github.com/mrlfarano/belen/releases/latest";
+
+/// Shown when a debug build tries to update; per platform because the build
+/// command differs.
+#[cfg(windows)]
+const DEBUG_UPDATES_MESSAGE: &str =
+    "updates are disabled in debug builds — build with scripts/build.ps1 -TauriBuild first";
+#[cfg(target_os = "macos")]
+const DEBUG_UPDATES_MESSAGE: &str =
+    "updates are disabled in debug builds — build with `pnpm tauri build --no-bundle` first";
 
 /// First line of every signed message; bump when the manifest format changes.
 const SIGNING_PREFIX: &str = "BELEN-UPDATE-1";
@@ -135,10 +149,7 @@ fn is_newer(candidate: &str, current: &str) -> Result<bool, String> {
 /// overwrite the source tree's target exe.
 fn ensure_updatable() -> Result<(), String> {
     if cfg!(debug_assertions) {
-        return Err(
-            "updates are disabled in debug builds — build with scripts/build.ps1 -TauriBuild first"
-                .to_string(),
-        );
+        return Err(DEBUG_UPDATES_MESSAGE.to_string());
     }
     Ok(())
 }
@@ -214,8 +225,7 @@ pub async fn apply(
         .parent()
         .ok_or("executable has no parent directory")?
         .to_path_buf();
-    let new_path = dir.join("BELEN.exe.new");
-    let old_path = dir.join("BELEN.exe.old");
+    let (new_path, old_path) = staged_paths(&exe)?;
 
     let response = client()?
         .get(url)
@@ -267,12 +277,33 @@ pub async fn apply(
         ));
     }
 
+    // `File::create` wrote 0644; without the running exe's mode the relaunch
+    // after the swap fails with Permission denied.
+    #[cfg(unix)]
+    if let Err(e) = copy_permissions(&exe, &new_path) {
+        let _ = fs::remove_file(&new_path);
+        return Err(e);
+    }
+
     swap(&exe, &new_path, &old_path)?;
     Ok(UpdateInfo {
         version: manifest.version,
         notes: manifest.notes,
         url: manifest.url,
     })
+}
+
+/// The downloaded file and the parked old image, named after the running
+/// executable itself: `BELEN.exe` → `BELEN.exe.new`/`.old`; a bare `BELEN`
+/// → `BELEN.new`/`.old`.
+fn staged_paths(exe: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let name = exe.file_name().ok_or("executable has no file name")?;
+    let dir = exe.parent().ok_or("executable has no parent directory")?;
+    let mut new_name = name.to_os_string();
+    new_name.push(".new");
+    let mut old_name = name.to_os_string();
+    old_name.push(".old");
+    Ok((dir.join(new_name), dir.join(old_name)))
 }
 
 /// Rename-based swap: a running exe cannot be deleted on Windows, but it can
@@ -286,6 +317,17 @@ fn swap(exe: &Path, new_path: &Path, old_path: &Path) -> Result<(), String> {
         return Err(format!("could not move the new exe into place (rolled back): {e}"));
     }
     Ok(())
+}
+
+/// Copy the running executable's permission mode onto the downloaded file, so
+/// the swapped-in version is as runnable as the one it replaces.
+#[cfg(unix)]
+fn copy_permissions(from: &Path, to: &Path) -> Result<(), String> {
+    let mode = fs::metadata(from)
+        .map_err(|e| format!("cannot read the running exe's permissions: {e}"))?
+        .permissions();
+    fs::set_permissions(to, mode)
+        .map_err(|e| format!("cannot set the new exe's permissions: {e}"))
 }
 
 /// Record what the next launch should report. The marker doubles as the user's
@@ -324,9 +366,9 @@ fn cleanup_leftovers() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    if let Some(dir) = exe.parent() {
-        let _ = fs::remove_file(dir.join("BELEN.exe.old"));
-        let _ = fs::remove_file(dir.join("BELEN.exe.new"));
+    if let Ok((new_path, old_path)) = staged_paths(&exe) {
+        let _ = fs::remove_file(old_path);
+        let _ = fs::remove_file(new_path);
     }
 }
 
@@ -366,10 +408,22 @@ fn wait_for_process_exit(pid: u32) {
     }
 }
 
-#[cfg(not(windows))]
-fn wait_for_process_exit(_pid: u32) {
-    // Windows is the only supported desktop target; other platforms are
-    // compiled for tests only, where there is no handoff to wait for.
+#[cfg(target_os = "macos")]
+fn wait_for_process_exit(pid: u32) {
+    // Poll kill(pid, 0): signal 0 is not delivered, it only checks the process
+    // exists. Same cap as Windows; on timeout proceed anyway — the
+    // single-instance plugin will send the newcomer home rather than let two
+    // windows fight.
+    const HANDOFF_TIMEOUT_MS: u64 = 30_000;
+    const POLL_MS: u64 = 25;
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(HANDOFF_TIMEOUT_MS);
+    while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(POLL_MS));
+    }
 }
 
 fn now_millis() -> u128 {
@@ -535,5 +589,42 @@ mod tests {
             .find_map(|a| a.strip_prefix("--wait-pid=").map(String::from))
             .and_then(|v| v.parse::<u32>().ok());
         assert_eq!(parsed, Some(4242));
+    }
+
+    #[test]
+    fn staged_paths_follow_the_exe_name() {
+        let dir = Path::new("/somewhere");
+
+        let (new_path, old_path) = staged_paths(&dir.join("BELEN.exe")).expect("windows shape");
+        assert_eq!(new_path, Path::new("/somewhere/BELEN.exe.new"));
+        assert_eq!(old_path, Path::new("/somewhere/BELEN.exe.old"));
+
+        let (new_path, old_path) = staged_paths(&dir.join("BELEN")).expect("macos shape");
+        assert_eq!(new_path, Path::new("/somewhere/BELEN.new"));
+        assert_eq!(old_path, Path::new("/somewhere/BELEN.old"));
+
+        assert!(staged_paths(Path::new("")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_permissions_copies_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("belen-perm-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let running = dir.join("BELEN");
+        let downloaded = dir.join("BELEN.new");
+        fs::write(&running, b"old").unwrap();
+        fs::write(&downloaded, b"new").unwrap();
+        fs::set_permissions(&running, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&downloaded, fs::Permissions::from_mode(0o644)).unwrap();
+
+        copy_permissions(&running, &downloaded).expect("copy permissions");
+
+        let mode = fs::metadata(&downloaded).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "downloaded file must gain the exe mode");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
