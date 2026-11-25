@@ -1,9 +1,13 @@
 #!/usr/bin/env node
-// BELEN release tooling — sign the portable exe and publish the update feed.
+// BELEN release tooling — sign the portable binary and publish the update feed.
 //
 //   pnpm release init                    create the signing keypair (once)
 //   pnpm release sign <BELEN.exe>        hash + sign, write latest.json
 //   pnpm release publish <exe> [json]    upload both to the GitHub release
+//
+// --platform=<windows|macos> (default windows) switches the asset and
+// manifest names — BELEN.exe/latest.json vs BELEN/latest-macos.json. The
+// signed message and the manifest schema are identical for both platforms.
 //
 // The private key lives outside the repo at ~/.belen/update-private.pem
 // (override with BELEN_UPDATE_KEY). The public key is committed at
@@ -27,6 +31,13 @@ import { fileURLToPath } from 'node:url'
 const REPO = 'mrlfarano/belen'
 const SIGNING_PREFIX = 'BELEN-UPDATE-1'
 
+// Asset and manifest names per platform; the default download URL is built
+// from the asset name. The signed message does not vary by platform.
+const PLATFORMS = {
+  windows: { asset: 'BELEN.exe', manifest: 'latest.json' },
+  macos: { asset: 'BELEN', manifest: 'latest-macos.json' },
+}
+
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const keyPath = process.env.BELEN_UPDATE_KEY || join(homedir(), '.belen', 'update-private.pem')
 const pubPath = join(appRoot, 'src-tauri', 'update.pubkey')
@@ -34,8 +45,8 @@ const pubPath = join(appRoot, 'src-tauri', 'update.pubkey')
 const usage = () => {
   console.error(`usage:
   pnpm release init                 create the signing keypair (refuses to overwrite)
-  pnpm release sign <BELEN.exe>     write latest.json (--out= --notes= --url=)
-  pnpm release publish <exe> [json] upload BELEN.exe + latest.json via gh`)
+  pnpm release sign <BELEN.exe>     write the manifest (--platform= --out= --notes= --url=)
+  pnpm release publish <exe> [json] upload the asset + manifest via gh`)
   process.exit(1)
 }
 
@@ -140,13 +151,13 @@ const init = () => {
 }
 
 const sign = () => {
-  const exe = pos[0] ? resolve(pos[0]) : fail('sign needs the path to BELEN.exe')
+  const exe = pos[0] ? resolve(pos[0]) : fail(`sign needs the path to ${platform.asset}`)
   if (!existsSync(exe)) fail(`no such file: ${exe}`)
 
   const version = appVersion()
   const sha256 = sha256File(exe)
   const signature = signMessage(signedMessage(version, sha256))
-  const url = flags.url || process.env.BELEN_UPDATE_URL || `https://github.com/${REPO}/releases/download/v${version}/BELEN.exe`
+  const url = flags.url || process.env.BELEN_UPDATE_URL || `https://github.com/${REPO}/releases/download/v${version}/${platform.asset}`
   const notes = flags.notes || `BELEN ${version}`
   const manifest = {
     version,
@@ -157,7 +168,7 @@ const sign = () => {
     signature,
   }
 
-  const out = flags.out ? resolve(flags.out) : join(process.cwd(), 'latest.json')
+  const out = flags.out ? resolve(flags.out) : join(process.cwd(), platform.manifest)
   writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`)
 
   console.log(`version:   ${version}`)
@@ -168,8 +179,8 @@ const sign = () => {
 }
 
 const publish = () => {
-  const exe = pos[0] ? resolve(pos[0]) : fail('publish needs the path to BELEN.exe')
-  const manifestPath = pos[1] ? resolve(pos[1]) : join(process.cwd(), 'latest.json')
+  const exe = pos[0] ? resolve(pos[0]) : fail(`publish needs the path to ${platform.asset}`)
+  const manifestPath = pos[1] ? resolve(pos[1]) : join(process.cwd(), platform.manifest)
   if (!existsSync(exe)) fail(`no such file: ${exe}`)
   if (!existsSync(manifestPath)) fail(`no such file: ${manifestPath}`)
 
@@ -179,8 +190,8 @@ const publish = () => {
   // GitHub asset names come from the file basename and are case-sensitive;
   // upload canonical names regardless of what the files are called locally.
   const stage = mkdtempSync(join(tmpdir(), 'belen-release-'))
-  const stagedExe = join(stage, 'BELEN.exe')
-  const stagedManifest = join(stage, 'latest.json')
+  const stagedExe = join(stage, platform.asset)
+  const stagedManifest = join(stage, platform.manifest)
   copyFileSync(exe, stagedExe)
   copyFileSync(manifestPath, stagedManifest)
 
@@ -213,7 +224,7 @@ const publish = () => {
       ])
       console.log(`created release ${tag}`)
     }
-    console.log(`feed:      https://github.com/${REPO}/releases/latest/download/latest.json`)
+    console.log(`feed:      https://github.com/${REPO}/releases/latest/download/${platform.manifest}`)
   } finally {
     rmSync(stage, { recursive: true, force: true })
   }
@@ -234,6 +245,9 @@ for (const arg of rest) {
     pos.push(arg)
   }
 }
+
+const platform = PLATFORMS[flags.platform ?? 'windows']
+if (!platform) fail(`unknown platform: ${flags.platform} — expected windows or macos`)
 
 switch (command) {
   case 'init':
