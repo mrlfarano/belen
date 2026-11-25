@@ -46,7 +46,10 @@ pub struct TestResult {
 }
 
 #[derive(Debug, Serialize, Clone)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// `rename_all` covers the variant names; `rename_all_fields` the fields inside
+// them — without it `call_id` reaches the webview as snake_case and tool_exec
+// rejects the invoke (missing required key `callId`).
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum StreamEvent {
     Token { text: String },
     /// One fully assembled tool call (fragments already joined by call index).
@@ -1083,6 +1086,22 @@ mod tests {
         let second = &calls[&1];
         assert_eq!(second.id.as_deref(), Some("call_b"));
         assert_eq!(second.arguments, "{}");
+    }
+
+    /// The webview's `StreamEvent` type reads `event.callId` on tool calls;
+    /// if this ever ships snake_case again, tool_exec rejects every call with
+    /// "missing required key callId".
+    #[test]
+    fn tool_call_event_serializes_camel_case_fields() {
+        let value = serde_json::to_value(StreamEvent::ToolCall {
+            call_id: "call_a".into(),
+            name: "workspace_list".into(),
+            arguments: "{}".into(),
+        })
+        .expect("ToolCall serializes");
+        assert_eq!(value["type"], "toolCall");
+        assert_eq!(value["callId"], "call_a");
+        assert!(value.get("call_id").is_none(), "no snake_case leak");
     }
 
     #[test]

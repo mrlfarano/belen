@@ -5,6 +5,20 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-25
+
+### Fixed
+
+- **Her tools work again — local models included.** Every tool call died with
+  `missing required key callId`: the stream shipped the call id as `call_id`
+  while the room reads `callId`, so the id never reached the executor and
+  nothing ran. The wire now speaks camelCase end to end, cloud providers too.
+
+### Added
+
+- **`/new` clears the room.** Type it in the composer to stop any running
+  stream and start over — the same reset as the command palette's New room.
+
 ## [0.5.0] — 2026-11-25
 
 ### Changed

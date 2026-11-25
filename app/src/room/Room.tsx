@@ -486,6 +486,13 @@ export default function Room() {
   const send = (text: string) => {
     stopStream()
 
+    if (/^\/new\s*$/i.test(text)) {
+      store.clear()
+      resetScroll()
+      scheduleSave()
+      return
+    }
+
     const command = text.match(/^\/([a-z0-9-]+)\s+([\s\S]+)$/i)
     if (command) {
       const manifest = skills
