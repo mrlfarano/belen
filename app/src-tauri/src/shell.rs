@@ -57,6 +57,7 @@ const POWERSHELL_EPILOGUE: &str = "\nif ($null -ne $LASTEXITCODE) { exit $LASTEX
 /// In front of every zsh command. A GUI-launched BELEN inherits almost no
 /// PATH; the login shell adds what /etc/paths.d and ~/.zprofile know, and
 /// this adds where the usual tools live.
+#[cfg(unix)]
 const ZSH_PRELUDE: &str = "export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"\n";
 
 pub fn handles(tool: &str) -> bool {
