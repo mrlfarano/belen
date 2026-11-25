@@ -28,6 +28,7 @@ jobs:
 
       - name: Install frontend dependencies
         shell: powershell
+        working-directory: app
         run: pnpm install --frozen-lockfile
 
       - name: Build portable exe
