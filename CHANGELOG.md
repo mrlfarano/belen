@@ -5,6 +5,18 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-11-24
+
+### Added
+
+- **Push-to-build pipeline.** Every push to `main` builds the portable exe on
+  the Windows machine via a self-hosted runner and stages it for testing.
+
+### Fixed
+
+- The About tab now always shows the running app's version — previously it
+  stayed blank until a check succeeded.
+
 ## [0.2.0] — 2026-11-24
 
 ### Added
