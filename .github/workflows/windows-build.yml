@@ -1,0 +1,60 @@
+# Dev-loop build: every push to main is built on MAYA (self-hosted Windows
+# runner) so the exe is ready to test without touching the dev checkout.
+#
+# The runner never executes pull_request events — the only triggers are pushes
+# to main by repo collaborators and manual dispatch — so fork PRs cannot run
+# code on the machine.
+#
+# Signing stays out of this pipeline: builds embed the committed public key;
+# the private key and `pnpm release sign/publish` remain a manual step.
+
+name: windows build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [self-hosted, maya]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install frontend dependencies
+        shell: powershell
+        run: pnpm install --frozen-lockfile
+
+      - name: Build portable exe
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -TauriBuild
+
+      - name: Stage exe for testing
+        shell: powershell
+        run: |
+          $exe = Join-Path $env:USERPROFILE '.belen-target\release\belen.exe'
+          if (-not (Test-Path $exe)) { throw "build produced no exe at $exe" }
+
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'artifact'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item $exe (Join-Path $stage 'BELEN.exe') -Force
+
+          # Stable test location: data/ created beside it survives rebuilds.
+          $test = Join-Path $env:USERPROFILE 'belen-dev'
+          New-Item -ItemType Directory -Force $test | Out-Null
+          Copy-Item $exe (Join-Path $test 'BELEN.exe') -Force
+
+          $version = (Get-Content src-tauri\tauri.conf.json | ConvertFrom-Json).version
+          Write-Output "BELEN $version built."
+          Write-Output "Test it at: $test\BELEN.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: belen-windows
+          path: artifact/BELEN.exe
+          retention-days: 7
