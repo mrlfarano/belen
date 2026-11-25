@@ -49,9 +49,9 @@ if [ "$want" = all ] || [ "$want" = macos ]; then
   pnpm test 2>&1 | tail -5
   echo "== macOS: cargo test --locked"
   # Every test runs where the login Keychain can be reached. Where it answers
-  # "User interaction is not allowed" — over SSH, for one — the two tests that
-  # write to it are skipped by name, and the log says so. Any other failure
-  # fails the build.
+  # "User interaction is not allowed" — over SSH, and on the runner — the two
+  # tests that write to it are skipped by name, and the log says so. Any
+  # other failure fails the build.
   rc=0
   out=$(cargo test --locked --manifest-path src-tauri/Cargo.toml 2>&1) || rc=$?
   if [ "$rc" -ne 0 ] && print -r -- "$out" | grep -q "User interaction is not allowed"; then

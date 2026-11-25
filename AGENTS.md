@@ -97,12 +97,12 @@ Docs-only pushes build too; that is fine — no release follows.
   (`undefined symbol: strlen`). Tauri links the Visual C++ runtime statically
   by itself, so the exe needs no redistributable either way. The details sit
   in `app/scripts/build-hammer.sh`.
-- **HAMMER's Keychain refuses SSH sessions** ("User interaction is not
-  allowed"). Through `ssh la@hammer`, the two Rust tests that write to the
-  login Keychain cannot run — `build-hammer.sh` notices and skips them by
-  name — and `gh` cannot read its stored login, so `pnpm release publish`
-  fails there. Both work in a desktop session on HAMMER, which is where the
-  runner's service runs; run those two tests in one when touching
+- **HAMMER's login Keychain answers "User interaction is not allowed"
+  outside a desktop session** — over `ssh la@hammer`, and on the runner. There
+  the two Rust tests that write to it cannot run (`build-hammer.sh` skips
+  them by name, and the log says so). Over SSH, `gh` cannot read its stored
+  login either, so `pnpm release publish` fails there. Both work in a
+  desktop session on HAMMER; run the two Keychain tests in one when touching
   `keys.rs`.
 - **The updater refuses debug builds and non-HTTPS feeds** (loopback http is
   allowed for rehearsals via `BELEN_UPDATE_FEED`). Don't try to update from
@@ -134,8 +134,8 @@ Docs-only pushes build too; that is fine — no release follows.
   plugin never sees two processes. `data/` is never touched; `.old` and the
   applied-update marker are cleaned up on next start.
 - Rust unit tests (DPAPI / Keychain, updater) run on HAMMER in every build
-  (`app/scripts/build-hammer.sh`: all of them in a desktop session, as the
-  runner's is; over SSH the two Keychain tests are skipped — see above), and
+  (`app/scripts/build-hammer.sh`: all of them in a desktop session; on the
+  runner and over SSH the two Keychain tests are skipped — see above), and
   on MAYA with `powershell -ExecutionPolicy Bypass -File scripts\build.ps1
   -Test` — run them when touching `src-tauri/`. Performance-sensitive
   changes: `pnpm perf` on MAYA before releasing.
