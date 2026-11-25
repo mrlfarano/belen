@@ -49,6 +49,35 @@ export class SkillsService extends Service {
     return manifest.capabilities.filter((c) => c !== 'chat' && !granted.has(c))
   }
 
+  /**
+   * Installs the skills an install had: the ones saved in config, or — before
+   * anyone has chosen any — every manifest in `catalog`, with the capabilities
+   * each needs. A saved list is kept as it is, even an empty one.
+   */
+  async restore(
+    saved: string[] | undefined,
+    grants: Record<string, string[]> | undefined,
+    catalog: Manifest[],
+  ): Promise<void> {
+    for (const [id, caps] of Object.entries(grants ?? {})) {
+      for (const capability of caps) this.grant(id, capability as Capability)
+    }
+    // The built-ins are this app's own code, so choosing them for the user
+    // means granting what they ask for.
+    const firstRun = saved === undefined
+    for (const manifest of catalog) {
+      if (!firstRun && !saved.includes(manifest.id)) continue
+      if (firstRun) {
+        for (const capability of this.missing(manifest)) this.grant(manifest.id, capability)
+      }
+      try {
+        await this.install(manifest)
+      } catch {
+        /* missing grant — the skills panel will ask again */
+      }
+    }
+  }
+
   async install(manifest: Manifest): Promise<void> {
     if (this.fibers.has(manifest.id)) return
 

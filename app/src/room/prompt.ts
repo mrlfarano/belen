@@ -42,3 +42,13 @@ export function toolPrompt(config: AppConfig | null | undefined, tools: ToolSche
   }
   return parts.join(' ')
 }
+
+/**
+ * Where the workspace tools are rooted for this send, so a request like
+ * "what's in my dev folder" can be read against the right place. Nothing when
+ * the root is unknown.
+ */
+export function workspaceLine(root: string | undefined): string {
+  const clean = root?.trim()
+  return clean ? `The workspace root is ${clean}.` : ''
+}

@@ -18,7 +18,7 @@ import { lastAppliedUpdate } from '../update/update'
 import BlockView from './BlockView'
 import Composer from './Composer'
 import Settings from '../settings/Settings'
-import { cancelStream, loadConfig, streamChat } from '../providers/client'
+import { cancelStream, loadConfig, loadDefaultWorkspace, streamChat } from '../providers/client'
 import { resolveSpec } from '../providers/auth'
 import {
   afterRound,
@@ -30,7 +30,7 @@ import {
 } from '../providers/toolLoop'
 import { toolsFor } from '../providers/tools'
 import { toolsOf, widthOf } from '../providers/config'
-import { toolPrompt } from './prompt'
+import { toolPrompt, workspaceLine } from './prompt'
 import { approvalPreview } from './approval'
 import type { AppConfig, ChatMessage, ProviderSpec } from '../providers/types'
 import type { BuiPayload } from '../bui/schema'
@@ -38,7 +38,7 @@ import { extractBui } from '../bui/extract'
 import { CATALOG } from '../skills/catalog'
 import { skills } from '../skills/runtime'
 import { startSubAgent, type AgentRun } from '../skills/agent'
-import type { Capability, Manifest } from '../skills/types'
+import type { Manifest } from '../skills/types'
 import CommandPalette, { type CommandId } from '../command/CommandPalette'
 
 const DEMO =
@@ -97,6 +97,8 @@ export default function Room() {
   /** Frozen oldest visible index while reading history; 0 when following. */
   const [anchor, setAnchor] = createSignal(0)
   const [config, setConfig] = createSignal<AppConfig | null>(null)
+  /** The workspace when none is chosen in Settings: the user's home folder. */
+  const [defaultWorkspace, setDefaultWorkspace] = createSignal('')
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [settingsTab, setSettingsTab] = createSignal<'provider' | 'chat' | 'skills' | 'about'>(
     'provider',
@@ -266,8 +268,12 @@ export default function Room() {
     const system = [
       // Per send: "now" must belong to the message it rides with.
       clockLine(),
+      // With no folder chosen, the broker works in the home folder.
+      withTools ? workspaceLine(workspace || defaultWorkspace()) : '',
       [systemPrompt(), toolPrompt(config(), tools)].filter(Boolean).join(' '),
-    ].join('\n\n')
+    ]
+      .filter(Boolean)
+      .join('\n\n')
 
     const id = append('assistant', '')
     setActive(id)
@@ -694,18 +700,8 @@ export default function Room() {
       setConfig(loaded)
       if (!loaded.provider) setSettingsOpen(true)
 
-      for (const [id, caps] of Object.entries(loaded.grants ?? {})) {
-        for (const cap of caps) skills.grant(id, cap as Capability)
-      }
-      for (const id of loaded.skills ?? []) {
-        const manifest = CATALOG.find((m) => m.id === id)
-        if (!manifest) continue
-        try {
-          await skills.install(manifest)
-        } catch {
-          /* missing grant — the skills panel will ask again */
-        }
-      }
+      // Before anyone has chosen skills, every built-in one is hers.
+      await skills.restore(loaded.skills, loaded.grants, CATALOG)
     } catch {
       /* first run */
     }
@@ -720,6 +716,10 @@ export default function Room() {
     )
 
     perfMode = await invoke<boolean>('perf_mode').catch(() => false)
+    void loadDefaultWorkspace().then(
+      (home) => setDefaultWorkspace(home),
+      () => {},
+    )
 
     if (!perfMode) {
       try {

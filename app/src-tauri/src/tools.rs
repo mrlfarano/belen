@@ -12,9 +12,9 @@ use crate::web;
 const READ_TOOLS: [&str; 3] = ["workspace_list", "workspace_read", "workspace_search"];
 
 /// Every tool the broker knows how to run. Which of them a call may use is
-/// decided per call by `Policy` (Settings → Chat → Tools): workspace reads
-/// are always available, every other class stays off until the user switches
-/// it on. A name missing here is refused no matter what is switched on.
+/// decided per call by `Policy` (Settings → Chat → Tools): every class is on
+/// until the user switches it off. A name missing here is refused no matter
+/// what is switched on.
 const ALLOWED_TOOLS: [&str; 8] = [
     "workspace_list",
     "workspace_read",
@@ -141,8 +141,22 @@ pub struct Policy {
 }
 
 impl Default for Policy {
-    /// Absent settings mean every switch is off and the strictest approval.
+    /// What an install gets before anyone touches the switches: every class
+    /// on, and the strictest approval — commands and file changes wait.
     fn default() -> Self {
+        Policy {
+            network: true,
+            files_write: true,
+            shell: true,
+            ask: Ask::Changes,
+        }
+    }
+}
+
+impl Policy {
+    /// Nothing may run. For a config that exists but cannot be read: the
+    /// switches it holds cannot be known, so none of them is assumed to be on.
+    fn none() -> Self {
         Policy {
             network: false,
             files_write: false,
@@ -150,22 +164,30 @@ impl Default for Policy {
             ask: Ask::Changes,
         }
     }
-}
 
-impl Policy {
-    /// From the `tools` section of config.json. A value that is not exactly
-    /// what the schema says counts as off — a hand-edited "yes", "editor" or
-    /// "sometimes" never widens what the model may do.
+    /// From the `tools` section of config.json. An absent switch keeps the
+    /// default; one that is present but not exactly what the schema says
+    /// counts as off — a hand-edited "yes", "editor" or "sometimes" never
+    /// turns anything on, and neither does a section that is not an object.
     pub fn from_config(tools: &serde_json::Value) -> Policy {
+        if !tools.is_null() && !tools.is_object() {
+            return Policy::none();
+        }
         let ask = match tools["askBefore"].as_str() {
             Some("commands") => Ask::Commands,
             Some("never") => Ask::Never,
             _ => Ask::Changes,
         };
+        // A missing key — in a section that is itself missing — reads as Null.
+        let switch = |key: &str| tools[key].is_null() || tools[key].as_bool() == Some(true);
         Policy {
-            network: tools["network"].as_bool() == Some(true),
-            files_write: tools["files"].as_str() == Some("write"),
-            shell: tools["shell"].as_bool() == Some(true),
+            network: switch("network"),
+            files_write: match tools["files"].as_str() {
+                Some("read") => false,
+                Some("write") => true,
+                _ => tools["files"].is_null(),
+            },
+            shell: switch("shell"),
             ask,
         }
     }
@@ -201,21 +223,30 @@ impl Policy {
     }
 }
 
-/// The saved policy, read from disk. Missing or unreadable ⇒ everything off.
+/// The saved policy, read from disk. No config.json yet is a first run and
+/// gets the defaults; a config that exists but cannot be read or parsed
+/// leaves everything off.
 fn load_policy() -> Policy {
-    let Ok(dir) = crate::keys::data_root() else {
+    match crate::keys::data_root() {
+        Ok(dir) => read_policy(&dir.join("config.json")),
+        Err(_) => Policy::none(),
+    }
+}
+
+fn read_policy(path: &Path) -> Policy {
+    if !path.exists() {
         return Policy::default();
-    };
-    match std::fs::read_to_string(dir.join("config.json")) {
+    }
+    match std::fs::read_to_string(path) {
         Ok(text) => parse_policy(&text),
-        Err(_) => Policy::default(),
+        Err(_) => Policy::none(),
     }
 }
 
 fn parse_policy(config_text: &str) -> Policy {
     match serde_json::from_str::<serde_json::Value>(config_text) {
-        Ok(json) => Policy::from_config(&json["tools"]),
-        Err(_) => Policy::default(),
+        Ok(json) if json.is_object() => Policy::from_config(&json["tools"]),
+        _ => Policy::none(),
     }
 }
 
@@ -248,17 +279,21 @@ fn dispatch(root: &str, tool: &str, call_id: &str, args_raw: &str) -> ToolOutcom
 /// room. Rust cannot see a click, so it cannot verify that — but requiring the
 /// flag means a renderer that dispatches a gated call without asking is
 /// refused here instead of running.
+///
+/// `workspace_root` is the folder Settings names, or None when it names none:
+/// the tools then work in the user's home.
 pub async fn exec(
-    workspace_root: &str,
+    workspace_root: Option<&str>,
     tool: &str,
     call_id: &str,
     args_json: &str,
     stream_id: &str,
     approved: bool,
 ) -> ToolOutcome {
+    let root = effective_root(workspace_root);
     exec_under(
         &load_policy(),
-        workspace_root,
+        &root,
         tool,
         call_id,
         args_json,
@@ -266,6 +301,29 @@ pub async fn exec(
         approved,
     )
     .await
+}
+
+/// The folder the workspace tools work in: the one the webview names, or —
+/// blank or none, which is Settings with its workspace field empty — the
+/// user's home. With no home to fall back on the root is empty, and every
+/// workspace tool reports it as unavailable.
+fn effective_root(workspace_root: Option<&str>) -> String {
+    resolve_root(workspace_root, &home_dir().unwrap_or_default())
+}
+
+fn resolve_root(workspace_root: Option<&str>, fallback: &Path) -> String {
+    match workspace_root.map(str::trim).filter(|root| !root.is_empty()) {
+        Some(root) => root.to_string(),
+        None => fallback.to_string_lossy().into_owned(),
+    }
+}
+
+/// The user's home folder, found the way `os.homedir()` finds it.
+pub fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 async fn exec_under(
@@ -1272,27 +1330,37 @@ mod tests {
         ["web_search", "web_fetch", "workspace_write", "workspace_edit", "run_command"];
 
     #[test]
-    fn every_class_is_off_until_it_is_switched_on() {
-        let off = Policy::from_config(&serde_json::json!({}));
-        assert_eq!(off, Policy::default(), "no settings is the default policy");
+    fn every_class_is_on_until_it_is_switched_off() {
+        let on = Policy::from_config(&serde_json::json!({}));
+        assert_eq!(on, Policy::default(), "no settings is the default policy");
+        assert_eq!(
+            Policy::from_config(&serde_json::Value::Null),
+            Policy::default(),
+            "so is a config with no tools section at all"
+        );
 
         for tool in NEW_CLASS_TOOLS {
-            let reason = off.allowed(tool).err().unwrap_or_default();
-            assert!(reason.contains("switched off"), "{tool} must be off by default");
+            assert!(on.allowed(tool).is_ok(), "{tool} must be on by default");
         }
         for tool in READ_TOOLS {
-            assert!(off.allowed(tool).is_ok(), "{tool} is always available");
+            assert!(on.allowed(tool).is_ok(), "{tool} is always available");
         }
-        assert_eq!(off.allowed("run_shell").unwrap_err(), "tool not allowed");
+        assert_eq!(on.allowed("run_shell").unwrap_err(), "tool not allowed");
     }
 
     #[test]
-    fn a_switch_enables_only_its_own_class() {
-        let web = Policy::from_config(&serde_json::json!({ "network": true }));
-        assert!(web.allowed("web_search").is_ok());
-        assert!(web.allowed("web_fetch").is_ok());
-        assert!(web.allowed("workspace_write").is_err());
-        assert!(web.allowed("run_command").is_err());
+    fn a_switch_turns_off_only_its_own_class() {
+        let no_web = Policy::from_config(&serde_json::json!({ "network": false }));
+        assert!(no_web.allowed("web_search").is_err());
+        assert!(no_web.allowed("web_fetch").is_err());
+        assert!(no_web.allowed("workspace_write").is_ok());
+        assert!(no_web.allowed("run_command").is_ok());
+
+        let read_only = Policy::from_config(&serde_json::json!({ "files": "read" }));
+        assert!(read_only.allowed("workspace_write").is_err());
+        assert!(read_only.allowed("workspace_edit").is_err());
+        assert!(read_only.allowed("web_search").is_ok());
+        assert!(read_only.allowed("run_command").is_ok());
 
         let all = Policy::from_config(
             &serde_json::json!({ "network": true, "files": "write", "shell": true }),
@@ -1305,22 +1373,58 @@ mod tests {
     #[test]
     fn values_that_are_not_the_schema_count_as_off() {
         // "yes" is not a boolean, "editor" is not a mode, "sometimes" is not
-        // a policy: a hand-edited config never widens what may run.
+        // a policy: a hand-edited config never turns anything on.
         let odd = Policy::from_config(&serde_json::json!({
             "network": "yes", "files": "editor", "shell": 1, "askBefore": "sometimes",
         }));
-        assert_eq!(odd, Policy::default());
+        assert_eq!(odd, Policy::none());
+
+        // One odd value leaves its neighbours on their defaults.
+        let partly = Policy::from_config(&serde_json::json!({ "network": "yes", "shell": true }));
+        assert!(!partly.network);
+        assert!(partly.shell);
+        assert!(partly.files_write);
+
+        // Nor is a section that is not an object a set of switches.
+        assert_eq!(Policy::from_config(&serde_json::json!("yes")), Policy::none());
     }
 
     #[test]
     fn a_broken_config_leaves_everything_off() {
-        assert_eq!(parse_policy("{ not json"), Policy::default());
+        assert_eq!(parse_policy("{ not json"), Policy::none());
+        assert_eq!(parse_policy("[]"), Policy::none());
+        // A config with no tools section has nobody's switches in it yet.
         assert_eq!(parse_policy(r#"{"provider":{}}"#), Policy::default());
         assert!(parse_policy(r#"{"tools":{"shell":true}}"#).shell);
+        assert!(!parse_policy(r#"{"tools":{"shell":false}}"#).shell);
+    }
+
+    #[test]
+    fn a_first_run_gets_the_defaults() {
+        let dir = temp_workspace("policy-file");
+        let path = dir.join("config.json");
+        assert_eq!(read_policy(&path), Policy::default(), "no config.json yet");
+
+        // A class the user turned off stays off, with nothing else written.
+        fs::write(&path, r#"{"tools":{"shell":false}}"#).unwrap();
+        assert_eq!(
+            read_policy(&path),
+            Policy {
+                shell: false,
+                ..Policy::default()
+            }
+        );
+
+        fs::write(&path, "{ not json").unwrap();
+        assert_eq!(read_policy(&path), Policy::none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn commands_and_file_changes_wait_for_approval_by_default() {
+        for tool in ["run_command", "workspace_write", "workspace_edit"] {
+            assert!(Policy::default().needs_approval(tool), "{tool} must ask by default");
+        }
         let all = Policy::from_config(
             &serde_json::json!({ "network": true, "files": "write", "shell": true }),
         );
@@ -1350,14 +1454,14 @@ mod tests {
         let ws = temp_workspace("policy");
         let root = canonical_str(&ws);
         fs::write(ws.join("a.txt"), "content").unwrap();
-        let off = Policy::default();
+        let off = Policy::none();
 
         let out = exec_under(&off, &root, "web_search", "c", "{}", "", true).await;
         assert!(out.denied);
         assert!(out.content.contains("switched off"), "{}", out.content);
 
         // "Never ask" is not a way to enable a class.
-        let never = Policy::from_config(&serde_json::json!({ "askBefore": "never" }));
+        let never = Policy::from_config(&serde_json::json!({ "askBefore": "never", "shell": false }));
         let out = exec_under(&never, &root, "run_command", "c", "{}", "", true).await;
         assert!(out.denied);
 
@@ -1385,11 +1489,51 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
-    // --- Web tools: refused until switched on, and the guard holds either way
+    // --- The workspace when Settings names none ------------------------------
+
+    #[test]
+    fn a_named_folder_wins_and_a_blank_one_falls_back() {
+        let fallback = Path::new("/home/someone");
+        assert_eq!(resolve_root(Some("C:\\w"), fallback), "C:\\w");
+        assert_eq!(resolve_root(Some("  "), fallback), "/home/someone");
+        assert_eq!(resolve_root(None, fallback), "/home/someone");
+        // Nothing to fall back on: an empty root, which the tools refuse.
+        assert_eq!(resolve_root(None, Path::new("")), "");
+    }
+
+    #[test]
+    fn the_fallback_is_the_home_folder() {
+        assert_eq!(
+            effective_root(None),
+            home_dir().unwrap_or_default().to_string_lossy()
+        );
+        assert_eq!(effective_root(Some(" /chosen/elsewhere ")), "/chosen/elsewhere");
+    }
 
     #[tokio::test]
-    async fn web_tools_are_refused_until_web_is_switched_on() {
-        let out = exec_under(&Policy::default(), "/tmp", "web_fetch", "c", "{\"url\":\"https://93.184.216.34/\"}", "", false).await;
+    async fn with_no_folder_named_the_tools_work_in_the_fallback() {
+        let ws = temp_workspace("home");
+        let home = canonical_str(&ws);
+        fs::write(ws.join("a.txt"), "content").unwrap();
+
+        let root = resolve_root(None, Path::new(&home));
+        let out = exec_under(&Policy::default(), &root, "workspace_read", "c", "{\"path\":\"a.txt\"}", "", false).await;
+        assert!(out.ok && !out.denied && out.content.contains("content"), "{}", out.content);
+
+        // With nothing to fall back on, the same call says so instead of
+        // looking somewhere else.
+        let out = exec_under(&Policy::default(), &resolve_root(None, Path::new("")), "workspace_read", "c", "{\"path\":\"a.txt\"}", "", false).await;
+        assert!(!out.ok && !out.denied, "{}", out.content);
+        assert!(out.error.unwrap().contains("unavailable"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // --- Web tools: refused once switched off, and the guard holds either way
+
+    #[tokio::test]
+    async fn web_tools_are_refused_once_web_is_switched_off() {
+        let off = Policy::from_config(&serde_json::json!({ "network": false }));
+        let out = exec_under(&off, "/tmp", "web_fetch", "c", "{\"url\":\"https://93.184.216.34/\"}", "", false).await;
         assert!(out.denied);
         assert!(out.content.contains("switched off"), "{}", out.content);
     }
@@ -1470,7 +1614,7 @@ mod tests {
         let args = r#"{"path":"a.txt","content":"new"}"#;
 
         // Off: refused before anything else, approval or not.
-        let out = call(&Policy::default(), &root, "workspace_write", args, true).await;
+        let out = call(&Policy::none(), &root, "workspace_write", args, true).await;
         assert!(out.denied && out.content.contains("switched off"), "{}", out.content);
 
         // On but not approved: the file is untouched.
@@ -1525,7 +1669,7 @@ mod tests {
         // anywhere else — and only once allowed.
         let shell_on = Policy::from_config(&serde_json::json!({ "shell": true }));
         let echo = r#"{"command":"echo hello-from-the-tool"}"#;
-        let out = call(&Policy::default(), &root, "run_command", echo, true).await;
+        let out = call(&Policy::none(), &root, "run_command", echo, true).await;
         assert!(out.denied && out.content.contains("switched off"), "{}", out.content);
         let out = call(&shell_on, &root, "run_command", echo, false).await;
         assert!(out.denied && out.content.contains("approval"), "{}", out.content);

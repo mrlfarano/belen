@@ -29,14 +29,15 @@ describe('tool catalog', () => {
 })
 
 describe('toolsFor', () => {
-  it('offers only the workspace reads when nothing is switched on', () => {
-    expect(names(toolsFor({ workspace: 'C:\\w' }, 'openai'))).toEqual(READ)
+  it('offers all eight before anyone has touched the switches', () => {
+    for (const config of [null, {}, { tools: {} }]) {
+      expect(names(toolsFor(config, 'openai'))).toEqual([...READ, ...names([...WEB_TOOLS, ...WRITE_TOOLS, ...SHELL_TOOLS])])
+    }
   })
 
-  it('offers nothing without a workspace while every switch is off', () => {
-    expect(toolsFor({}, 'openai')).toEqual([])
-    expect(toolsFor(null, 'openai')).toEqual([])
-    expect(toolsFor({ workspace: '   ' }, 'openai')).toEqual([])
+  it('offers only the workspace reads when every other class is switched off', () => {
+    const off: AppConfig = { tools: { network: false, files: 'read', shell: false } }
+    expect(names(toolsFor(off, 'openai'))).toEqual(READ)
   })
 
   it('needs a protocol that streams tool calls', () => {
@@ -49,19 +50,17 @@ describe('toolsFor', () => {
     expect(toolsFor(all, 'lmstudio')).toEqual([])
   })
 
-  it('offers the web tools without a workspace', () => {
-    expect(names(toolsFor({ tools: { network: true } }, 'openai'))).toEqual(['web_search', 'web_fetch'])
-  })
-
-  it('keeps file changes and commands behind a workspace', () => {
-    const noWorkspace: AppConfig = { tools: { files: 'write', shell: true } }
-    expect(toolsFor(noWorkspace, 'openai')).toEqual([])
-    expect(names(toolsFor({ ...noWorkspace, workspace: 'C:\\w' }, 'openai'))).toEqual([
+  it('needs no workspace: with none chosen, the broker works in the home folder', () => {
+    const changes: AppConfig = { tools: { network: false, files: 'write', shell: true } }
+    expect(names(toolsFor(changes, 'openai'))).toEqual([
       ...READ,
       'workspace_write',
       'workspace_edit',
       'run_command',
     ])
+    // A blank folder counts as none chosen, and a chosen one changes nothing.
+    expect(names(toolsFor({ workspace: '   ' }, 'openai'))).toHaveLength(8)
+    expect(names(toolsFor({ workspace: 'C:\\w' }, 'openai'))).toHaveLength(8)
   })
 
   it('ignores switches that are not exactly on', () => {

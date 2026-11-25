@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { knownModels, PROVIDERS } from '../providers/registry'
 import {
   discover,
+  loadDefaultWorkspace,
   providerKey,
   providerOAuthKey,
   saveConfig,
@@ -72,6 +73,8 @@ export default function Settings(props: Props) {
     props.initialTab ?? 'provider',
   )
   const [workspaceField, setWorkspaceField] = createSignal(props.config?.workspace ?? '')
+  /** The workspace when the field is empty: the user's home folder. */
+  const [defaultWorkspace, setDefaultWorkspace] = createSignal('')
   const switches = () => toolsOf(props.config)
   const [searchKey, setSearchKey] = createSignal('')
   const [searchKeyStatus, setSearchKeyStatus] = createSignal<string | null>(null)
@@ -446,7 +449,11 @@ export default function Settings(props: Props) {
   }
 
   onMount(() => {
-    if (props.config?.tools?.network === true) void loadSearchKey()
+    if (switches().network) void loadSearchKey()
+    void loadDefaultWorkspace().then(
+      (home) => setDefaultWorkspace(home),
+      () => {},
+    )
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') props.onClose()
     }
@@ -535,13 +542,13 @@ export default function Settings(props: Props) {
               class="field-input"
               value={workspaceField()}
               onChange={(e) => void changeWorkspace(e.currentTarget.value)}
-              placeholder="C:\path\to\workspace  ·  /path/to/workspace"
+              placeholder={defaultWorkspace() || 'C:\\path\\to\\workspace  ·  /path/to/workspace'}
               spellcheck={false}
             />
             <p class="hint-line">
-              Folder the assistant works in with its file tools (list, read, search). Paths
-              outside it and credential files (.env, keys, the key store) are refused by a Rust
-              broker. &quot;Change files&quot; and &quot;Run commands&quot; need this folder.
+              Folder the assistant works in with her file tools (list, read, search) and her
+              commands. Leave it empty to use your home folder. Paths outside it and credential
+              files (.env, keys, the key store) are refused by a Rust broker.
             </p>
           </label>
 
@@ -574,7 +581,7 @@ export default function Settings(props: Props) {
               <span>Run commands: PowerShell on Windows, zsh on macOS</span>
             </label>
             <p class="hint-line">
-              Off until you turn them on. Commands and file changes are real: nothing is
+              On until you turn them off. Commands and file changes are real: nothing is
               sandboxed, and by default each one waits for you in the room.
             </p>
           </div>

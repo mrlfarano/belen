@@ -72,18 +72,20 @@ describe('workspace', () => {
 })
 
 describe('tool switches', () => {
-  const everythingOff = {
-    network: false,
-    files: 'read',
-    shell: false,
+  const everythingOn = {
+    network: true,
+    files: 'write',
+    shell: true,
     askBefore: 'changes',
     search: 'tavily',
   } as const
+  const everythingOff = { ...everythingOn, network: false, files: 'read', shell: false } as const
 
-  it('are all off when the section is missing or empty', () => {
-    expect(toolsOf(null)).toEqual(everythingOff)
-    expect(toolsOf({})).toEqual(everythingOff)
-    expect(toolsOf({ tools: {} })).toEqual(everythingOff)
+  it('are all on when the section is missing or empty', () => {
+    expect(toolsOf(null)).toEqual(everythingOn)
+    expect(toolsOf({})).toEqual(everythingOn)
+    expect(toolsOf({ tools: {} })).toEqual(everythingOn)
+    expect(toolsOf({ tools: { network: null } } as unknown as AppConfig)).toEqual(everythingOn)
   })
 
   it('count anything but the exact schema as off, like the broker does', () => {
@@ -93,11 +95,26 @@ describe('tool switches', () => {
     expect(toolsOf(odd)).toEqual(everythingOff)
   })
 
-  it('read back exactly what was switched on', () => {
+  it('let a malformed value turn off its own class only', () => {
+    const odd = { tools: { network: 'yes', shell: true } } as unknown as AppConfig
+    expect(toolsOf(odd)).toEqual({ ...everythingOn, network: false })
+  })
+
+  it('turn everything off when the section itself is not an object', () => {
+    expect(toolsOf({ tools: 'yes' } as unknown as AppConfig)).toEqual(everythingOff)
+  })
+
+  it('read back exactly what was switched', () => {
     const on = toolsOf(
       withTools(null, { network: true, files: 'write', shell: true, askBefore: 'commands' }),
     )
-    expect(on).toEqual({ ...everythingOff, network: true, files: 'write', shell: true, askBefore: 'commands' })
+    expect(on).toEqual({ ...everythingOn, askBefore: 'commands' })
+
+    // An install that turned a class off keeps it off across restarts.
+    const off = toolsOf(
+      withTools(null, { network: false, files: 'read', shell: false, askBefore: 'never' }),
+    )
+    expect(off).toEqual({ ...everythingOff, askBefore: 'never' })
   })
 
   it('change one switch without disturbing the others or the rest of the config', () => {

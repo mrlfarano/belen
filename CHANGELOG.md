@@ -5,6 +5,29 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-25
+
+### Changed
+
+- **Her tools are on from the first run.** Web search and page reading, file
+  changes and commands used to stay off until switched on in Settings → Chat →
+  Tools, which is why she came out with nothing but the clock. They are on
+  until you switch them off, and an install that already saved a choice keeps
+  it. Commands and file changes still wait for you in the room.
+- **Your home folder is the workspace** when Settings names none, so the file
+  tools and commands have somewhere to work. The model is told the root on
+  every send. Choose another folder in Settings → Chat to change it.
+- **All seven built-in skills install themselves** before anyone has chosen
+  skills in Settings → Skills, with the capabilities they need. A saved list
+  is kept as it is, even an empty one.
+
+### Fixed
+
+- **Web tools could not run with no workspace attached.** The room sent every
+  tool call without its workspace argument, and Tauri refuses a call that is
+  missing a required argument — before the broker ever saw it. The argument
+  is optional now.
+
 ## [0.4.0] — 2026-11-25
 
 ### Added

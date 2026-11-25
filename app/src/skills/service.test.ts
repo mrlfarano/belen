@@ -85,3 +85,36 @@ describe('skills runtime', () => {
     expect(skills.get(skill.id)).toBeUndefined()
   })
 })
+
+describe('restoring skills at start', () => {
+  const plugin: Manifest = { ...skill, id: 'file-plugin', kind: 'plugin', capabilities: ['files'] }
+  const installed = (skills: SkillsService) => skills.installed().map((m) => m.id)
+
+  it('before anyone chose skills, installs every built-in one with what it needs', async () => {
+    const skills = await boot()
+    await skills.restore(undefined, undefined, [skill, plugin])
+    expect(installed(skills)).toEqual(['test-skill', 'file-plugin'])
+    expect(skills.granted('file-plugin')).toEqual(['files'])
+  })
+
+  it('keeps a saved list as it is, even an empty one', async () => {
+    const skills = await boot()
+    await skills.restore([], undefined, [skill, plugin])
+    expect(installed(skills)).toEqual([])
+
+    await skills.restore([skill.id], undefined, [skill, plugin])
+    expect(installed(skills)).toEqual([skill.id])
+  })
+
+  it('does not grant a saved skill what was never granted', async () => {
+    const skills = await boot()
+    await skills.restore([plugin.id], undefined, [plugin])
+    expect(installed(skills)).toEqual([])
+  })
+
+  it('restores the saved grants first', async () => {
+    const skills = await boot()
+    await skills.restore([plugin.id], { [plugin.id]: ['files'] }, [plugin])
+    expect(installed(skills)).toEqual([plugin.id])
+  })
+})

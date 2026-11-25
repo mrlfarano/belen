@@ -43,19 +43,27 @@ export const ASK_BEFORE_OPTIONS: Array<{ id: AskBefore; label: string }> = [
 
 /**
  * The tool switches with every default filled in. Mirrors the broker's
- * `Policy` (tools.rs): a value that is not exactly the schema counts as off,
- * so a hand-edited config never shows the model a tool the broker refuses.
+ * `Policy` (tools.rs): an absent switch is on, and a value that is present but
+ * not exactly the schema counts as off — as does a section that is not an
+ * object — so a hand-edited config never shows the model a tool the broker
+ * refuses.
  */
 export function toolsOf(config: AppConfig | null | undefined): Tools {
   const tools = config?.tools
+  // A section that is not an object is a hand-edited mistake: nothing runs.
+  const broken = tools != null && typeof tools !== 'object'
+  const off = (value: unknown) => broken || (!absent(value) && value !== true)
   return {
-    network: tools?.network === true,
-    files: tools?.files === 'write' ? 'write' : 'read',
-    shell: tools?.shell === true,
+    network: !off(tools?.network),
+    files: broken || (!absent(tools?.files) && tools?.files !== 'write') ? 'read' : 'write',
+    shell: !off(tools?.shell),
     askBefore: isOneOf(ASK_BEFORE, tools?.askBefore, 'changes'),
     search: isOneOf(SEARCH_BACKENDS, tools?.search, 'tavily'),
   }
 }
+
+/** Absent and null both keep the default; the broker reads them the same way. */
+const absent = (value: unknown) => value === undefined || value === null
 
 export function withTools(
   config: AppConfig | null | undefined,

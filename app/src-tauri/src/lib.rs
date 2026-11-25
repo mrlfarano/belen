@@ -175,9 +175,11 @@ fn provider_cancel(stream_id: String) {
 /// Arguments arrive as raw JSON text and are re-parsed here: the renderer's
 /// validation is convenience, not trust. `approved` is the webview's word that
 /// the user okayed the call in the room; absent counts as not approved.
+/// `workspace_root` is the folder Settings names, or absent when it names
+/// none — the tools then work in the user's home.
 #[tauri::command]
 async fn tool_exec(
-    workspace_root: String,
+    workspace_root: Option<String>,
     name: String,
     call_id: String,
     args_json: String,
@@ -185,7 +187,7 @@ async fn tool_exec(
     approved: Option<bool>,
 ) -> Result<tools::ToolOutcome, String> {
     Ok(tools::exec(
-        &workspace_root,
+        workspace_root.as_deref(),
         &name,
         &call_id,
         &args_json,
@@ -193,6 +195,14 @@ async fn tool_exec(
         approved.unwrap_or(false),
     )
     .await)
+}
+
+/// The workspace when Settings names none: the user's home folder.
+#[tauri::command]
+fn workspace_default() -> Result<String, String> {
+    tools::home_dir()
+        .map(|home| home.to_string_lossy().into_owned())
+        .ok_or_else(|| "the home folder is unknown".to_string())
 }
 
 #[tauri::command]
@@ -326,6 +336,7 @@ pub fn run() {
             provider_stream,
             provider_cancel,
             tool_exec,
+            workspace_default,
             oauth_device_start,
             oauth_device_poll,
             oauth_refresh,

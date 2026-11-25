@@ -58,6 +58,11 @@ export function saveConfig(config: AppConfig): Promise<void> {
   return invoke('config_set', { config })
 }
 
+/** The folder the tools work in when no workspace is chosen: the user's home. */
+export function loadDefaultWorkspace(): Promise<string> {
+  return invoke<string>('workspace_default')
+}
+
 export const providerKey = (id: string) => `provider-${id}`
 export const providerOAuthKey = (id: string) => `provider-${id}-oauth`
 /** The web search key lives in the same key store as provider keys, under its own name. */

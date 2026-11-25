@@ -168,9 +168,9 @@ A `belen perf` script fails the build on any breach.
 - Export: Markdown + JSON. Import: JSON.
 - **No account. No telemetry. No network** except the provider the user chose —
   and the update check, which only runs when the user asks for it (About tab
-  or palette command) — and, only while switched on in Settings → Chat →
-  Tools, the web tools: a search API called with the user's own key, and the
-  public pages the model is sent to read.
+  or palette command) — and the web tools, on unless switched off in Settings →
+  Chat → Tools: a search API called with the user's own key, and the public
+  pages the model is sent to read.
 
 ---
 

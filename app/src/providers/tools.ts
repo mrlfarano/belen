@@ -3,14 +3,15 @@ import { toolsOf } from './config'
 import type { AppConfig, AskBefore } from './types'
 
 /**
- * The tools the model can be given, grouped by the switch that unlocks them
- * (Settings → Chat → Tools). Nothing here runs until the user turns its class
- * on, and the Rust broker reads those switches itself for every call
- * (`Policy` in tools.rs) — this file only decides what to advertise and
- * validates what comes back.
+ * The tools the model can be given, grouped by the switch that owns them
+ * (Settings → Chat → Tools). Every class is on until the user turns it off,
+ * and the Rust broker reads those switches itself for every call (`Policy` in
+ * tools.rs) — this file only decides what to advertise and validates what
+ * comes back.
  *
- *  - workspace reads: list, read, search. Need an attached workspace.
- *  - web: search and fetch. Run on their own.
+ *  - workspace reads: list, read, search. They work in the workspace chosen
+ *    in Settings, or in the user's home when none is.
+ *  - web: search and fetch.
  *  - workspace writes: create and edit. Each change waits for the user.
  *  - commands: PowerShell on Windows, zsh on macOS. Each command waits for
  *    the user — this is real, unsandboxed access to the machine, and that
@@ -174,17 +175,18 @@ const TOOL_KINDS = new Set(['openai', 'anthropic', 'google'])
 
 /**
  * The tools to advertise for one send: protocol support first, then the
- * workspace, then the switches. Everything else keeps chatting as before.
+ * switches. The workspace tools are always among them — with no folder chosen
+ * in Settings, the broker works in the user's home. Everything else keeps
+ * chatting as before.
  */
 export function toolsFor(config: AppConfig | null | undefined, kind: string): ToolSchema[] {
   if (!TOOL_KINDS.has(kind)) return []
   const switches = toolsOf(config)
-  const workspace = typeof config?.workspace === 'string' && config.workspace.trim().length > 0
   return [
-    ...(workspace ? WORKSPACE_TOOLS : []),
+    ...WORKSPACE_TOOLS,
     ...(switches.network ? WEB_TOOLS : []),
-    ...(workspace && switches.files === 'write' ? WRITE_TOOLS : []),
-    ...(workspace && switches.shell ? SHELL_TOOLS : []),
+    ...(switches.files === 'write' ? WRITE_TOOLS : []),
+    ...(switches.shell ? SHELL_TOOLS : []),
   ]
 }
 

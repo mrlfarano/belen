@@ -118,9 +118,10 @@ export type AskBefore = 'changes' | 'commands' | 'never'
 export type SearchBackend = 'tavily'
 
 /**
- * The tool switches (Settings → Chat → Tools). Absent or malformed values
- * mean "off"; the Rust broker reads the same section and refuses a class that
- * is not exactly switched on, so this is a preference, not the trust boundary.
+ * The tool switches (Settings → Chat → Tools). An absent switch is on, and a
+ * malformed value means "off"; the Rust broker reads the same section and
+ * refuses a class that is switched off, so this is a preference, not the trust
+ * boundary.
  */
 export type ToolsConfig = {
   /** Web search and page fetch. */
@@ -142,7 +143,10 @@ export type AppConfig = {
     /** Conversation column width; absent = 'default' (the 0.2 look). */
     width?: ChatWidth
   }
-  /** Absolute path of the workspace the tools may look into. */
+  /**
+   * Absolute path of the workspace the tools may look into. Absent means the
+   * user's home folder, which the broker resolves itself.
+   */
   workspace?: string
   tools?: ToolsConfig
 }
