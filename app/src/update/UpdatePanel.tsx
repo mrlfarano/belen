@@ -1,4 +1,5 @@
 import { createSignal, onMount, Show } from 'solid-js'
+import { getVersion } from '@tauri-apps/api/app'
 import { applyUpdate, checkForUpdates, progressLabel } from './update'
 import type { ApplyProgress, CheckResult } from './update'
 
@@ -11,12 +12,16 @@ type Phase = 'idle' | 'checking' | 'available' | 'downloading' | 'restarting'
 
 export default function UpdatePanel(props: Props) {
   const [result, setResult] = createSignal<CheckResult | null>(null)
+  const [localVersion, setLocalVersion] = createSignal<string | null>(null)
   const [phase, setPhase] = createSignal<Phase>('idle')
   const [progress, setProgress] = createSignal<ApplyProgress | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [upToDate, setUpToDate] = createSignal(false)
 
   const busy = () => phase() === 'checking' || phase() === 'downloading'
+
+  // The running exe's own version — shown even when the feed is unreachable.
+  const currentVersion = () => result()?.current ?? localVersion() ?? null
 
   const statusLine = () => {
     switch (phase()) {
@@ -64,7 +69,8 @@ export default function UpdatePanel(props: Props) {
     }
   }
 
-  onMount(() => {
+  onMount(async () => {
+    setLocalVersion(await getVersion().catch(() => null))
     if (props.autoCheck) void runCheck()
   })
 
@@ -79,7 +85,7 @@ export default function UpdatePanel(props: Props) {
         Updates are checked when you ask — nothing downloads or runs on its own.
       </p>
 
-      <p class="hint-line">Version {result()?.current ?? '…'}</p>
+      <p class="hint-line">Version {currentVersion() ?? '…'}</p>
 
       <div class="settings-row">
         <button
