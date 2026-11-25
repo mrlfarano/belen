@@ -48,16 +48,23 @@ if [ "$want" = all ] || [ "$want" = macos ]; then
   pnpm typecheck
   pnpm test 2>&1 | tail -5
   echo "== macOS: cargo test --locked"
-  # Over SSH the login Keychain answers "User interaction is not allowed", so
-  # the two tests that write to it can only run from a desktop session —
-  # which is where the runner's service lives.
-  skip=""
-  security show-keychain-info login.keychain-db >/dev/null 2>&1 \
-    || skip="--skip keychain_roundtrip --skip keychain_names_normalize"
-  [ -z "$skip" ] && echo "(Keychain reachable: every test runs)" \
-    || echo "(no Keychain access here: the two Keychain tests are skipped)"
-  cargo test --locked --manifest-path src-tauri/Cargo.toml -- ${=skip} 2>&1 \
-    | grep -E "test result: ok\. [0-9]+ passed|FAILED|panicked|^error"
+  # Every test runs where the login Keychain can be reached. Where it answers
+  # "User interaction is not allowed" — over SSH, for one — the two tests that
+  # write to it are skipped by name, and the log says so. Any other failure
+  # fails the build.
+  rc=0
+  out=$(cargo test --locked --manifest-path src-tauri/Cargo.toml 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] && print -r -- "$out" | grep -q "User interaction is not allowed"; then
+    echo "(no Keychain access here: the two Keychain tests are skipped — $(print -r -- "$out" | grep -m1 "User interaction is not allowed"))"
+    rc=0
+    out=$(cargo test --locked --manifest-path src-tauri/Cargo.toml \
+      -- --skip keychain_roundtrip --skip keychain_names_normalize 2>&1) || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    print -r -- "$out" | grep -E "FAILED|panicked|^error"
+    exit "$rc"
+  fi
+  print -r -- "$out" | grep -E "test result: ok\. [0-9]+ passed"
   echo "== macOS: pnpm tauri build --no-bundle"
   pnpm tauri build --no-bundle 2>&1 | tail -3
   cp "$target/release/belen" ~/builds/belen/BELEN
