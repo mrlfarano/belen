@@ -1238,7 +1238,9 @@ select.field-input option {
 }
 
 .hint-line {
-  margin: -1.5vh 0 3.5vh;
+  /* Positive top margin: a negative one pulled every hint up over the control
+     above it (width buttons, inputs, checkboxes). */
+  margin: 8px 0 3.5vh;
   font-family: var(--mono);
   font-size: var(--step--2);
   color: var(--ink-faint);

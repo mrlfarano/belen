@@ -1,6 +1,6 @@
 [package]
 name = "belen"
-version = "0.6.0"
+version = "0.6.1"
 description = "BELEN — the interface is the conversation"
 authors = ["BELEN"]
 edition = "2021"

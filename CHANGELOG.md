@@ -5,6 +5,15 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-25
+
+### Fixed
+
+- **Settings no longer draws its hints over its controls.** Every explanation
+  line in Settings (conversation width, workspace, tools, ask-before) carried a
+  negative top margin that pulled it up across the buttons, input or choices
+  above it. The hint now sits below the control it belongs to.
+
 ## [0.6.0] — 2026-11-25
 
 ### Fixed
