@@ -387,3 +387,44 @@ Design notes:
 **Windows verification still pending** (the crate only builds on Windows):
 rename-while-running, the PID wait, and the relaunch — rehearse with a local
 feed before the first published update.
+
+---
+
+## macOS build — Apple Silicon (2026-11-24)
+
+Planned in [05-macos-build.md](05-macos-build.md): the same portable shape as
+Windows — a bare `BELEN` binary with `data/` beside it — with the login
+Keychain replacing DPAPI and a separate signed feed (`latest-macos.json`).
+Work lands on `feat/macos-build`; the C/N/R ids below are the plan's.
+
+| ID | Task | Output | Evidence |
+|---|---|---|---|
+| T37 | C1 — target-specific dependencies (`windows` under `cfg(windows)`; `security-framework` + `libc` under `cfg(target_os = "macos")`) | `Cargo.toml`, `Cargo.lock` | **Done** — `cargo metadata --locked` succeeds; the lock diff touches only the `belen` block (both crates were already locked) |
+| T38 | C2 — Keychain key store behind `cfg` (service `dev.belen.desktop`, account = key name) | `keys.rs` | **Done** — macOS round-trip and name tests pass, DPAPI tests stay `#[cfg(windows)]`; item-not-found (−25300) reads as `None`, empty values are stored, a denied read errors (never `None`) |
+| T39 | C3 — working set via `proc_pid_rusage` (`ri_resident_size`, main process) | `perf.rs` | **Done** — `proc_pid_rusage` returns a non-zero resident size on HAMMER; the harness number lands with N4 (T46) |
+| T40 | C4 — updater: `staged_paths` derived from the running file, executable bit copied (`#[cfg(unix)]`), real PID wait (`kill(pid, 0)` poll, 25 ms / 30 s cap), per-platform feed and messages | `updater.rs` | **Done** — unit tests for the paths and the permission copy; the PID wait and feed are covered by the R3 rehearsal |
+| T41 | C5 — tray left-click opens the menu on macOS; `RunEvent::Reopen` restores a hidden window | `lib.rs` | **Done** — `cfg!`-gated left-click and a `Reopen` handler reusing the tray's `show_window`; the on-Mac interaction check is N1 (T43) |
+| T42 | C6 — run it | — | **Pending** — `pnpm --dir app tauri dev` shows the room (HAMMER); the release binary already boots clean and creates the `data/` layout |
+| T43 | N1 — window, tray and keyboard checklist (release build) | — | **Pending** — the M2 checklist in `05-macos-build.md`, on HAMMER |
+| T44 | N2 — WebKit pass of the UI: composer hint `⌘ K` | `Composer.tsx` | **Done** — hint reads `⌘ K` on macOS; the rest of the rendering checklist is N1 |
+| T45 | N3 — harness scripts find the macOS binary (one shared helper, four callers) | `perf.mjs`, `summon.mjs`, `probe.mjs`, `live-probe.mjs` | **Done** — helper `app/scripts/lib/exe-path.mjs`; macOS fallback `src-tauri/target/<debug\|release>/belen`, `BELEN_EXE` and the Windows lookups unchanged; resolution smoke-checked on HAMMER, full runs are N4 (T46) |
+| T46 | N4 — measure and record macOS numbers | this file | **Done** — release build on HAMMER, 2026-11-24: `perf` startup median 470 ms (gate ≤1500), keystroke p99 1 ms, dropped frames 0, working set 114.0 MB (gate ≤120), exe 8.9 MB (gate ≤15); `summon` 72 ms (gate ≤150); `probe` PASS (stream, db round-trip, oauth, rate limit, error path). All gates green, none moved |
+| T47 | R1 — `macos build` workflow (new file; `windows-build.yml` untouched) | `.github/workflows/macos-build.yml` | **Done** — file in place, ASCII and YAML checked, current action majors verified against their repos; the first CI run and the `belen-macos` artifact land with the next push to `main` |
+| T48 | R2 — `release sign` / `publish` learn `--platform` (default `windows` unchanged) | `scripts/release.mjs` | **Done** — `--platform=macos` signs `BELEN` into `latest-macos.json`; same Ed25519 message; `publish` adds to an existing release |
+| T49 | R3 — loopback rehearsal of the macOS update | — | **Pending** — the M3 checklist: feed on `127.0.0.1:8788`, update applies, hash-corruption refused, executable bit kept, Keychain prompt expected |
+| T50 | R4 — docs | `AGENTS.md`, both READMEs, `01-spec.md`, `CHANGELOG.md` | **Done** — two-platform loop in AGENTS.md, macOS quickstarts, spec §10 note, `0.3.0` changelog entry |
+| T51 | R5 — bump to `0.3.0`, release both platforms | the four version files | **Pending** — four assets on `v0.3.0` (`BELEN.exe`, `latest.json`, `BELEN`, `latest-macos.json`); Windows publishes first, macOS adds to it |
+
+Design notes:
+
+- The macOS updater stages `BELEN.new` / `BELEN.old` beside the bare binary
+  and re-applies the executable bit before the swap; everything else in the
+  swap-and-rollback design is unchanged from T34.
+- The 0.3.0 build is unsigned, so a downloaded `BELEN` needs `chmod +x`
+  (plus `xattr -d com.apple.quarantine` for browser downloads), and macOS
+  asks for Keychain access after each update — **Always Allow** (ad-hoc
+  signing makes every build a stranger). Developer ID signing is the plan's
+  optional M4.
+- Performance budgets measured on macOS (N4, 2026-11-24): every hard gate
+  passes — startup 470 ms median, working set 114 MB, summon 72 ms, `probe`
+  PASS — with the gates left at their Windows calibration.

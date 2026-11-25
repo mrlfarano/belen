@@ -1,12 +1,14 @@
 # BELEN — agent instructions
 
-BELEN is a portable Windows app: one `BELEN.exe`, `data/` beside it, no
-installer. It ships through **itself**: releases go to GitHub Releases, and
-the app's Settings → About tab installs them over the air.
+BELEN is a portable Windows and macOS (Apple Silicon) app: one `BELEN.exe`
+on Windows, a bare `BELEN` on macOS, `data/` beside it, no installer. It
+ships through **itself**: releases go to GitHub Releases, and the app's
+Settings → About tab installs them over the air.
 
 Machines: **HAMMER** (Mac — develop here) and **MAYA** (Windows — builds and
-tests there via a self-hosted Actions runner). The Rust crate compiles only
-on Windows; HAMMER can run the frontend gates and release tooling.
+tests there via a self-hosted Actions runner). The Rust crate compiles on
+Windows and macOS; HAMMER builds and runs it too, plus the frontend gates
+and release tooling.
 
 ## The loop — how every bug fix and feature ships
 
@@ -25,8 +27,9 @@ app follows this exact sequence:
    three manifests disagree. (Hand-editing the lock's belen version entry is
    expected here; cargo regenerates the rest on MAYA.)
 3. **Add a CHANGELOG.md entry** under a new `## [X.Y.Z] — date` heading.
-4. **Commit to `main` and push.** The push triggers the `windows build`
-   workflow automatically — but only if the runner is up (see below).
+4. **Commit to `main` and push.** The push triggers the `windows build` and
+   `macos build` workflows automatically — the Windows one only if the
+   runner is up (see below).
 5. **Watch the build** and wait for green:
    ```bash
    gh run list --repo mrlfarano/belen --limit 1
@@ -34,16 +37,24 @@ app follows this exact sequence:
    ```
    Green means the exe is staged at `%USERPROFILE%\belen-dev\BELEN.exe` on
    MAYA (for the user's manual testing) and uploaded as the `belen-windows`
-   artifact.
-6. **Release** (only when the change should actually reach the app):
+   artifact. `macos build` runs the same push on a GitHub-hosted Apple
+   Silicon runner and uploads the `belen-macos` artifact (a bare `BELEN`
+   binary) — wait for both runs before releasing.
+6. **Release** (only when the change should actually reach the app) — both
+   platforms, Windows first so its `publish` creates the release and the
+   macOS call adds to it:
    ```bash
-   rm -rf /tmp/belen-rel && mkdir -p /tmp/belen-rel
-   gh run download <run-id> --repo mrlfarano/belen -n belen-windows -D /tmp/belen-rel
-   pnpm --dir app release sign /tmp/belen-rel/BELEN.exe --out=/tmp/belen-rel/latest.json --notes="one line for the update dialog"
-   pnpm --dir app release publish /tmp/belen-rel/BELEN.exe /tmp/belen-rel/latest.json
+   rm -rf /tmp/belen-rel && mkdir -p /tmp/belen-rel/win /tmp/belen-rel/mac
+   gh run download <windows-run-id> --repo mrlfarano/belen -n belen-windows -D /tmp/belen-rel/win
+   gh run download <macos-run-id>   --repo mrlfarano/belen -n belen-macos   -D /tmp/belen-rel/mac
+   pnpm --dir app release sign /tmp/belen-rel/win/BELEN.exe --out=/tmp/belen-rel/win/latest.json --notes="one line for the update dialog"
+   pnpm --dir app release sign /tmp/belen-rel/mac/BELEN --platform=macos --out=/tmp/belen-rel/mac/latest-macos.json --notes="one line for the update dialog"
+   pnpm --dir app release publish /tmp/belen-rel/win/BELEN.exe /tmp/belen-rel/win/latest.json
+   pnpm --dir app release publish /tmp/belen-rel/mac/BELEN /tmp/belen-rel/mac/latest-macos.json --platform=macos
    ```
-   `publish` creates the `vX.Y.Z` release **with both assets in one
-   operation**. Never draft-first, never create or move tags by hand.
+   The first `publish` creates the `vX.Y.Z` release **with both assets in
+   one operation**; the second adds the macOS pair to it. Never draft-first,
+   never create or move tags by hand.
 7. **Tell the user to update**: Settings → About → **Check for updates** →
    **Update & restart**. Done means the user confirms the new version in the
    About tab and the room shows `BELEN X.Y.Z installed.`
@@ -72,27 +83,33 @@ Docs-only pushes also trigger a build; that is fine — no release follows.
   a `tauri dev` build.
 - **Signing key**: `~/.belen/update-private.pem` (HAMMER, chmod 600). The
   public key is committed at `app/src-tauri/update.pubkey` and compiled into
-  every exe. Losing the private key means existing installs can only be
+  every binary. Losing the private key means existing installs can only be
   updated by hand — back it up offline; do not regenerate casually, and
   never commit any `.private.pem`.
 - **CI files are sensitive here** (`.github/workflows/windows-build.yml`
   encodes the build machine's quirks) — change them only with the user's
   explicit ask, and prefer the smallest edit.
+- **Every release publishes both platforms.** Both update feeds are fetched
+  from whichever release is Latest, so a release that ships only one
+  platform leaves the other platform's installs with a 404 update feed.
 
 ## Handy facts
 
-- Repo: `github.com/mrlfarano/belen` (public). Feed:
-  `https://github.com/mrlfarano/belen/releases/latest/download/latest.json`.
-- Manifest `latest.json`: `version, pubDate, url, sha256, notes, signature`
+- Repo: `github.com/mrlfarano/belen` (public). Feeds:
+  `https://github.com/mrlfarano/belen/releases/latest/download/latest.json`
+  (Windows) and `latest-macos.json` at the same path (macOS).
+- Manifest `latest.json` (macOS: `latest-macos.json`, same format):
+  `version, pubDate, url, sha256, notes, signature`
   — Ed25519 over `BELEN-UPDATE-1\n{version}\n{sha256}`. The download URL is
   never taken from the webview; `update_apply` re-fetches and re-verifies.
 - Update swap: rename running exe → `.old`, rename `.exe.new` in, rollback on
   failure; restart via `--wait-pid=<pid>` handoff so the single-instance
   plugin never sees two processes. `data/` is never touched; `.old` and the
   applied-update marker are cleaned up on next start.
-- Rust unit tests (DPAPI, updater) run on MAYA with
-  `powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Test` — run
-  that when touching `src-tauri/`. Performance-sensitive changes: `pnpm perf`
+- Rust unit tests (DPAPI / Keychain, updater) run on MAYA with
+  `powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Test`, and on
+  HAMMER with `cargo test --manifest-path app/src-tauri/Cargo.toml` — run
+  them when touching `src-tauri/`. Performance-sensitive changes: `pnpm perf`
   on MAYA before releasing.
 - Build traps on MAYA (handled by `scripts/build.ps1` — always build through
   it): a machine-global `~/.cargo/config.toml` from another project, and a

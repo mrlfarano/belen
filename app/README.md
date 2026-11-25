@@ -1,16 +1,19 @@
 # BELEN
 
-**The interface is the conversation.** A native Windows room where the model's answer can become the tool you need.
+**The interface is the conversation.** A native Windows and macOS (Apple Silicon) room where the model's answer can become the tool you need.
 
 This is the app workspace. Product context lives one level up in [../01-spec.md](../01-spec.md).
 
 ## Requirements
 
 - Windows 11 + WebView2 Runtime
+- macOS 11+ (Apple Silicon)
 - Node 24+, pnpm 12+
-- Rust 1.98 (MSVC) + Visual Studio 2026 Build Tools
+- Rust 1.98 (MSVC + Visual Studio 2026 Build Tools on Windows, Xcode command-line tools on macOS)
 
 ## Quickstart
+
+Windows:
 
 ```powershell
 pnpm install
@@ -18,6 +21,27 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
 Then run `%USERPROFILE%\.belen-target\debug\belen.exe`.
+
+macOS (Apple Silicon):
+
+```bash
+pnpm install
+pnpm tauri build --no-bundle
+```
+
+Then run `src-tauri/target/release/belen`. A downloaded release `BELEN` is
+unsigned — first put it in a writable folder (`~/Apps/BELEN/`, **not**
+`/Applications`: `data/` cannot be created there), then:
+
+```bash
+chmod +x BELEN
+xattr -d com.apple.quarantine BELEN   # only if a browser downloaded it
+./BELEN
+```
+
+After an update, macOS may ask for Keychain access ("BELEN wants to use your
+confidential information…") — choose **Always Allow**, or saved keys cannot
+be read.
 
 ## Commands
 
@@ -42,21 +66,21 @@ Then run `%USERPROFILE%\.belen-target\debug\belen.exe`.
 ## Architecture
 
 ```
-WebView2 (renderer)
+Webview (WebView2 / WKWebView)
 ├── SolidJS room · BUI renderer · streaming append path
 ├── Cordis kernel (Context · Fiber · Service · reversible effects)
 └── provider / agent / manifest-loader services (proxies)
 
 Rust core
 ├── Tauri commands + channels
-├── DPAPI key store  → data/keys/*.dpapi
+├── key store        → DPAPI on Windows (data/keys/*.dpapi), login Keychain on macOS
 ├── data root        → data/ beside the executable
 ├── updater          → signed manifest check, exe swap, restart handoff
 └── perf snapshot    → working set, exe size, boot time
 ```
 
 Cordis's core dependencies are pure TypeScript (`cosmokit`, `@standard-schema/spec`),
-so the kernel runs inside WebView2 without shipping Node. The official
+so the kernel runs inside the webview without shipping Node. The official
 `@cordisjs/plugin-loader` is Node-only and is not used; BELEN has its own
 manifest loader.
 
@@ -75,6 +99,11 @@ manifest loader.
 failure. The debug build is expected to miss the startup target; the release
 build is the number that counts.
 
+macOS (Apple Silicon, release build, 2026-11-24): startup median **470 ms**
+across 3 runs, keystroke p99 **1 ms**, dropped frames **0**, idle working set
+**114.0 MB**, executable **8.9 MB** — all hard gates pass. Summon (second
+instance → first window) **72 ms** against the 150 ms gate.
+
 ## Portable
 
 Copy `%USERPROFILE%\.belen-target\release\belen.exe` to any folder as `BELEN.exe`.
@@ -85,8 +114,9 @@ with the perf report included.
 ## Updates
 
 The portable exe updates itself in place. Settings → About (or the `Ctrl+K`
-palette) checks a signed `latest.json` on the GitHub releases, and after
-confirmation downloads, hash-verifies and swaps the exe, then restarts through a
+palette, `⌘K` on Mac) checks a signed manifest (`latest.json` on Windows,
+`latest-macos.json` on macOS) on the GitHub releases, and after
+confirmation downloads, hash-verifies and swaps the binary, then restarts through a
 `--wait-pid` handoff so the single-instance lock never rejects the new process.
 `data/` is untouched; debug builds refuse to update. The Ed25519 public key lives
 at `src-tauri/update.pubkey`; the matching private key stays outside the repo

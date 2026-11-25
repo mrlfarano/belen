@@ -106,7 +106,7 @@ The registry entry carries: id, label, endpoint templates, auth type, model meta
 
 **Z.ai** uses `https://api.z.ai/api/paas/v4` (Coding Plan: `https://api.z.ai/api/coding/paas/v4`). Its `/models` endpoint works — 13 models as of 2026-11-24, including `glm-5.4` and `glm-5.3`. The registry also ships a known-model fallback so an outage degrades to a usable list with a notice instead of a dead end.
 
-**Authentication modes:** API key, access token (bearer), environment variable, and OAuth 2.0 device code ([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)). OAuth tokens live in DPAPI and refresh 60 s before expiry. Design and provider notes: [04-auth.md](04-auth.md).
+**Authentication modes:** API key, access token (bearer), environment variable, and OAuth 2.0 device code ([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)). OAuth tokens live in the key store — DPAPI on Windows, the login Keychain on macOS — and refresh 60 s before expiry. Design and provider notes: [04-auth.md](04-auth.md).
 
 **The config sheet assembles in place** — no modal, no wizard:
 
@@ -117,7 +117,7 @@ The registry entry carries: id, label, endpoint templates, auth type, model meta
 5. **Test** — one-token request, reports TTFT.
 6. Live updates via Cordis `Volatile<T>` / `fiber.update()` — change a value, no restart.
 
-**Keys:** Windows DPAPI (`CryptProtectData`, CurrentUser scope) via Rust. Never in the renderer, never in logs, never in export.
+**Keys:** Windows DPAPI (`CryptProtectData`, CurrentUser scope) via Rust; on macOS, generic passwords in the login Keychain (service `dev.belen.desktop`). Never in the renderer, never in logs, never in export.
 
 ---
 
@@ -164,7 +164,7 @@ A `belen perf` script fails the build on any breach.
 ## 9. Data, keys, privacy
 
 - **SQLite + FTS5** for rooms, blocks, settings and the catalog.
-- Files live beside the executable: `data/belen.db`, `data/config.json`, `data/keys.dpapi`.
+- Files live beside the executable: `data/belen.db`, `data/config.json`, `data/keys.dpapi` — the same `data/` layout beside `BELEN.exe` on Windows or a bare `BELEN` on macOS.
 - Export: Markdown + JSON. Import: JSON.
 - **No account. No telemetry. No network** except the provider the user chose —
   and the update check, which only runs when the user asks for it (About tab
@@ -174,7 +174,9 @@ A `belen perf` script fails the build on any breach.
 
 ## 10. Non-goals for v1
 
-Mobile, web, macOS/Linux · cloud sync, accounts, sharing · third-party code plugins (manifests only) · RAG / knowledge bases · image and audio generation · unprompted update checks (updates run only on demand, from the About tab).
+Mobile, web, Linux · cloud sync, accounts, sharing · third-party code plugins (manifests only) · RAG / knowledge bases · image and audio generation · unprompted update checks (updates run only on demand, from the About tab).
+
+> **Revised 2026-11-24:** macOS (Apple Silicon) is no longer a non-goal — as of 0.3.0 BELEN ships there too, as a portable bare binary with the same `data/` layout and keys in the login Keychain. See [05-macos-build.md](05-macos-build.md).
 
 ---
 
@@ -185,6 +187,7 @@ Mobile, web, macOS/Linux · cloud sync, accounts, sharing · third-party code pl
 3. Demo: **3 providers**, one room, one interactive table, one sub-agent.
 4. Uninstall a skill → **zero** remaining listeners or timers (Cordis test).
 5. Portable folder runs from a clean folder with WebView2 present.
+6. On macOS (Apple Silicon), the portable `BELEN` binary runs from a clean writable folder.
 
 ---
 

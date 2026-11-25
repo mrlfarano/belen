@@ -5,6 +5,26 @@ All notable changes to BELEN are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-24
+
+### Added
+
+- **macOS build (Apple Silicon).** BELEN now also ships as a portable bare
+  binary — `BELEN`, no `.app` bundle — with the same `data/` layout beside
+  it as on Windows. Every push builds it in CI (`macos build` workflow,
+  `belen-macos` artifact).
+- **Keychain key storage on macOS.** API keys and OAuth tokens are stored
+  as generic passwords in the login Keychain (service `dev.belen.desktop`);
+  Windows keeps DPAPI. No secrets live in `data/` on either platform.
+- **Separate macOS update feed.** macOS installs check a signed
+  `latest-macos.json`, so a Windows install can never be handed a macOS
+  binary (or vice versa). Releases now publish both platforms.
+- **First run on macOS (unsigned build).** Put `BELEN` in a writable folder
+  (for example `~/Apps/BELEN/` — not `/Applications`), run `chmod +x
+  BELEN`, and for browser downloads `xattr -d com.apple.quarantine BELEN`.
+  After an update macOS may ask for Keychain access — choose **Always
+  Allow**, or saved keys cannot be read.
+
 ## [0.2.2] — 2026-11-24
 
 ### Added
